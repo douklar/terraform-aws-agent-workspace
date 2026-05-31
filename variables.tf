@@ -197,7 +197,7 @@ variable "instance_schedule_windows" {
     {
       name       = "free_time"
       mode       = "free-time"
-      timezone   = "Europe/Rome"
+      timezone   = "Europe/Berlin"
       days       = ["MON", "TUE", "WED", "THU", "FRI"]
       start_time = "18:30"
       stop_time  = "23:00"
@@ -205,7 +205,7 @@ variable "instance_schedule_windows" {
     {
       name       = "weekends"
       mode       = "free-time"
-      timezone   = "Europe/Rome"
+      timezone   = "Europe/Berlin"
       days       = ["SAT", "SUN"]
       start_time = "11:00"
       stop_time  = "22:00"
