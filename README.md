@@ -5,6 +5,7 @@
 <h1 align="center">terraform-aws-agent-workspace</h1>
 
 <p align="center">
+  <a href="https://registry.terraform.io/modules/douklar/agent-workspace/aws"><img src="https://img.shields.io/badge/Terraform%20Registry-douklar%2Fagent--workspace-7B42BC?style=flat-square&logo=terraform&logoColor=white" alt="Terraform Registry" /></a>
   <img src="https://img.shields.io/badge/Terraform-%3E%3D1.9-7B42BC?style=flat-square&logo=terraform&logoColor=white" alt="Terraform >= 1.9" />
   <img src="https://img.shields.io/badge/AWS%20Provider-~%3E%206.47-FF9900?style=flat-square&logo=amazonaws&logoColor=white" alt="AWS Provider ~> 6.47" />
   <img src="https://img.shields.io/badge/Ubuntu-24.04%20LTS-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS" />
@@ -41,7 +42,7 @@ This module is designed for developers who want a ready-to-use cloud workstation
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   aws_region = "eu-central-1"
@@ -50,13 +51,19 @@ module "workspace" {
 
 Run `terraform init && terraform apply`. All variables have sensible defaults.
 
-Connect to your instance after apply:
+After apply, connect to your instance using the ready-to-run output:
 
 ```bash
-aws ssm start-session --target <instance_id> --region eu-central-1
+terraform output -raw ssm_start_session_command
 ```
 
-The instance ID is printed as a Terraform output.
+Or connect directly:
+
+```bash
+aws ssm start-session --target $(terraform output -raw instance_id) --region eu-central-1
+```
+
+See [`examples/basic`](examples/basic) for a complete working configuration, or copy [`terraform.tfvars.example`](terraform.tfvars.example) as a starting point.
 
 ---
 
@@ -68,7 +75,7 @@ The instance starts and stops automatically according to configurable time windo
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   aws_region = "eu-central-1"
@@ -98,7 +105,7 @@ Timezone strings follow the [IANA tz database](https://en.wikipedia.org/wiki/Lis
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   instance_type = "m7i-flex.xlarge"  # 4 vCPU, 16 GB RAM
@@ -114,7 +121,7 @@ The module creates encrypted SSM Parameter Store placeholders. Terraform never r
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   extra_env_vars = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"]
@@ -140,7 +147,7 @@ All tools except Codex CLI are enabled by default. Override to control what gets
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   developer_config = {
@@ -167,11 +174,42 @@ aws ssm put-parameter \
 
 Reboot or restart the Tailscale service on the instance to activate. The instance joins your Tailscale network with no inbound ports open.
 
+#### Tailscale access control policy
+
+Apply this ACL in your [Tailscale admin console](https://login.tailscale.com/admin/acls) to restrict access to the workspace. Only Tailscale admins can reach it on port 22 or open a Tailscale SSH session — no other users or devices can connect. Advanced users can customize the policy further — for example adding more tags, user groups, or port rules — directly in the Tailscale console.
+
+```json
+{
+    "tagOwners": {
+        "tag:ssh-enabled": ["autogroup:admin"]
+    },
+
+    "acls": [
+        {
+            "action": "accept",
+            "src":    ["autogroup:admin"],
+            "dst":    ["tag:ssh-enabled:22"]
+        }
+    ],
+
+    "ssh": [
+        {
+            "action": "accept",
+            "src":    ["autogroup:admin"],
+            "dst":    ["tag:ssh-enabled"],
+            "users":  ["ubuntu"]
+        }
+    ]
+}
+```
+
+To apply this tag to the workspace device, generate a **pre-authenticated, tagged auth key** in the Tailscale admin console (`Settings → Keys → Generate auth key`) and enable the `tag:ssh-enabled` tag on it. Then write that key to SSM instead of a plain auth key — the device will inherit the tag automatically on join.
+
 ### Automated backups
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   scheduler_features = {
@@ -205,7 +243,7 @@ module "workspace" {
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   cost_report = {
@@ -223,7 +261,7 @@ All resources use AWS-managed keys by default. To use your own KMS key across al
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   kms_key_arn = "arn:aws:kms:eu-central-1:123456789012:key/mrk-abc123"
@@ -247,7 +285,7 @@ If you are using the default VPC without a NAT Gateway, the instance needs a pub
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   associate_public_ip = true
@@ -258,7 +296,7 @@ For an existing VPC and subnet:
 
 ```hcl
 module "workspace" {
-  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
   vpc_id    = "vpc-0abc123"
@@ -286,7 +324,7 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 | `ingress_ports` | `[]` | Additional inbound security group rules |
 | `egress_ports` | `443, 80, 41641/udp` | Outbound security group rules |
 | `ami_id` | `null` | AMI override (`null` = latest Ubuntu 24.04 LTS) |
-| `developer_config` | all tools enabled | Tooling installed at boot |
+| `developer_config` | Claude Code + VS Code + Tailscale enabled; Codex CLI disabled | Tooling installed at boot |
 | `instance_schedule_windows` | Evenings + weekends, Berlin | Start/stop schedule windows |
 | `scheduler_features` | reconcile only | Backup, patch, and cleanup jobs |
 | `extra_env_vars` | `[]` | Create SSM placeholders for environment variables |
@@ -299,6 +337,27 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 | `cost_center` | `engineering` | Cost center tag for billing attribution |
 | `owner_email` | `owner@example.com` | Owner tag for operational responsibility |
 | `tags` | `{}` | Additional tags applied to all resources |
+
+---
+
+## Outputs
+
+| Name | Description |
+|:---|:---|
+| `instance_id` | EC2 instance ID |
+| `instance_public_ip` | Public IP address (if `associate_public_ip = true`) |
+| `ami_id` | AMI used to launch the instance |
+| `root_volume_id` | Root EBS volume ID |
+| `ssm_start_session_command` | Ready-to-run `aws ssm start-session` command |
+| `workspace_log_group_name` | CloudWatch log group for bootstrap and instance logs |
+| `scheduler_lambda_name` | Name of the EventBridge scheduler Lambda |
+| `scheduler_lambda_arn` | ARN of the EventBridge scheduler Lambda |
+| `scheduler_names` | All EventBridge Scheduler schedule names created |
+| `ami_transfer_lambda_name` | AMI transfer Lambda name (null if transfer disabled) |
+| `manual_export_latest_ami_example` | Example `aws lambda invoke` command to export the latest AMI (null if export disabled) |
+| `ami_export_bucket_name` | S3 bucket used for AMI exports (null if export disabled) |
+| `scheduler_dlq_arn` | ARN of the scheduler Lambda dead-letter queue |
+| `cost_report_enabled` | Whether the AWS Budgets alert is active |
 
 ---
 
@@ -318,7 +377,7 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 
 1. If `developer_config.enable_tailscale = true` — write the Tailscale auth key to SSM
 2. If `extra_env_vars` is configured — write each secret value to SSM
-3. Connect: `aws ssm start-session --target <instance_id> --region eu-central-1`
+3. Connect: run `terraform output -raw ssm_start_session_command` and execute the result
 4. The instance starts automatically at the next scheduled window
 
 ---
@@ -341,6 +400,12 @@ AWS credentials must have permission to create and manage: EC2, IAM, Lambda, Eve
 When `ami_transfer.enable_export = true`, AWS VM Import/Export requires a pre-existing IAM role named `vmimport` (configurable via `ami_transfer.export_role_name`). The role must trust the `vmie.amazonaws.com` service principal.
 
 See [AWS VM Import/Export — Required permissions](https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html) for the exact trust policy and S3 bucket policy.
+
+After apply, the `manual_export_latest_ami_example` output prints the exact `aws lambda invoke` command to trigger an export — no manual construction needed:
+
+```bash
+terraform output -raw manual_export_latest_ami_example
+```
 
 ---
 
