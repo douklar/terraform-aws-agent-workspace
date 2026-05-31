@@ -1,6 +1,26 @@
-# terraform-aws-agent-workspace
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/douklar/douklar/main/assets/logo.png" />
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/douklar/douklar/main/assets/logo-for-light-mode.png" />
+    <img src="https://raw.githubusercontent.com/douklar/douklar/main/assets/logo.png" alt="Douklar DevOps Tools Logo" width="300" />
+  </picture>
+</p>
 
-A Terraform module that deploys a personal AI agent workspace on AWS — an Ubuntu EC2 instance that automatically starts in the evening, stops at night, stays backed up, and is accessible via browser-based terminal without opening any ports.
+<h1 align="center">Agent Workspace</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Terraform-7B42BC?style=flat&logo=terraform&logoColor=white" alt="Terraform" />
+  &nbsp;
+  <img src="https://img.shields.io/badge/AWS-232F3E?style=flat&logo=amazonaws&logoColor=white" alt="AWS" />
+</p>
+
+<p align="center">
+  <strong>Part of the Douklar DevOps Tools series.</strong>
+</p>
+
+<p align="center">
+  A Terraform module that deploys a personal AI agent workspace on AWS — an Ubuntu EC2 instance that automatically starts in the evening, stops at night, stays backed up, and is accessible via browser-based terminal without opening any ports.
+</p>
 
 > **Designed for:** developers who want a cloud workstation for running AI agents (Claude Code, Codex, etc.) without spending time on AWS infrastructure research.
 
