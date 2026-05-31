@@ -1,0 +1,534 @@
+#!/bin/bash
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+BOOTSTRAP_LOG_FILE="/var/log/user-data-debug.log"
+install -m 0644 /dev/null "$BOOTSTRAP_LOG_FILE"
+exec > >(tee -a /var/log/user-data-debug.log) 2>&1
+
+log() {
+  printf '[bootstrap] %s\n' "$*"
+}
+
+retry() {
+  local max_attempts=5
+  local delay_seconds=10
+  local attempt=1
+
+  until "$@"; do
+    local exit_code=$?
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      log "Command failed after $attempt attempts: $*"
+      return "$exit_code"
+    fi
+
+    log "Command failed with exit code $exit_code; retrying in $delay_seconds seconds: $*"
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+    delay_seconds=$((delay_seconds * 2))
+  done
+}
+
+wait_for_apt_locks() {
+  systemctl stop unattended-upgrades 2>/dev/null || true
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+    log "Waiting for apt/dpkg lock"
+    sleep 5
+  done
+}
+
+apt_update() {
+  wait_for_apt_locks
+  dpkg --configure -a || true
+  retry apt-get update
+}
+
+apt_install() {
+  wait_for_apt_locks
+  dpkg --configure -a || true
+  retry apt-get install -y "$@"
+}
+
+install_aws_cli() {
+  local aws_cli_tmp_dir
+  local aws_cli_version
+
+  if command -v aws >/dev/null 2>&1; then
+    aws_cli_version=$(aws --version)
+    if [[ "$aws_cli_version" == aws-cli/2.* ]]; then
+      log "aws cli is already installed: $aws_cli_version"
+      return 0
+    fi
+
+    log "existing aws cli is not v2; installing aws cli v2: $aws_cli_version"
+  fi
+
+  aws_cli_tmp_dir=$(mktemp -d)
+  trap 'rm -rf "$aws_cli_tmp_dir"; trap - RETURN' RETURN
+
+  retry curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip \
+    -o "$aws_cli_tmp_dir/awscliv2.zip"
+  unzip -q "$aws_cli_tmp_dir/awscliv2.zip" -d "$aws_cli_tmp_dir"
+  "$aws_cli_tmp_dir/aws/install" --update
+  aws --version
+}
+
+install_tailscale() {
+  local installer="/tmp/tailscale-install.sh"
+
+  if command -v tailscale >/dev/null 2>&1; then
+    log "tailscale is already installed"
+    return 0
+  fi
+
+  wait_for_apt_locks
+  dpkg --configure -a || true
+  retry curl -fsSL https://tailscale.com/install.sh -o "$installer"
+  TS_INSTALL_ONLY=1 sh "$installer"
+  rm -f "$installer"
+
+  # The installer may still start tailscaled and run tailscale up interactively.
+  # Stop and reset it so bootstrap can start it cleanly itself.
+  systemctl stop tailscaled || true
+  systemctl reset-failed tailscaled || true
+
+  command -v tailscale >/dev/null 2>&1
+}
+
+install_cloudwatch_agent() {
+  local agent_ctl="/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl"
+  local agent_deb="/tmp/amazon-cloudwatch-agent.deb"
+  local arch
+  local region
+
+  if [ ! -x "$agent_ctl" ]; then
+    arch=$(dpkg --print-architecture)
+    region="${aws_region}"
+    if ! retry curl -fsSL "https://amazoncloudwatch-agent-$region.s3.$region.amazonaws.com/ubuntu/$arch/latest/amazon-cloudwatch-agent.deb" \
+      -o "$agent_deb"; then
+      retry curl -fsSL "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/$arch/latest/amazon-cloudwatch-agent.deb" \
+        -o "$agent_deb"
+    fi
+    wait_for_apt_locks
+    dpkg --configure -a || true
+    if ! dpkg -i "$agent_deb"; then
+      apt-get install -f -y
+    fi
+    rm -f "$agent_deb"
+  fi
+
+  mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+  cat >/opt/aws/amazon-cloudwatch-agent/etc/workspace-logs.json <<'CLOUDWATCH_AGENT_CONFIG'
+{
+  "agent": {
+    "run_as_user": "root"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/user-data-debug.log",
+            "log_group_name": "${cloudwatch_log_group_name}",
+            "log_stream_name": "{instance_id}/user-data-debug"
+          },
+          {
+            "file_path": "/var/log/cloud-init-output.log",
+            "log_group_name": "${cloudwatch_log_group_name}",
+            "log_stream_name": "{instance_id}/cloud-init-output"
+          },
+          {
+            "file_path": "/var/log/cloud-init.log",
+            "log_group_name": "${cloudwatch_log_group_name}",
+            "log_stream_name": "{instance_id}/cloud-init"
+          },
+          {
+            "file_path": "/var/log/syslog",
+            "log_group_name": "${cloudwatch_log_group_name}",
+            "log_stream_name": "{instance_id}/syslog"
+          }
+        ]
+      }
+    }
+  }
+}
+CLOUDWATCH_AGENT_CONFIG
+
+  "$agent_ctl" \
+    -a fetch-config \
+    -m ec2 \
+    -s \
+    -c file:/opt/aws/amazon-cloudwatch-agent/etc/workspace-logs.json
+  systemctl enable amazon-cloudwatch-agent
+}
+
+install_ssm_agent() {
+  if command -v snap >/dev/null 2>&1 && snap list amazon-ssm-agent >/dev/null 2>&1; then
+    if ! retry snap start --enable amazon-ssm-agent; then
+      retry systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
+    fi
+    return 0
+  fi
+
+  if dpkg -s amazon-ssm-agent >/dev/null 2>&1; then
+    systemctl enable --now amazon-ssm-agent
+    return 0
+  fi
+
+  if ! command -v snap >/dev/null 2>&1; then
+    apt_install snapd
+    retry systemctl enable --now snapd.socket
+    retry systemctl start snapd.service
+  fi
+
+  retry timeout 120s snap wait system seed.loaded
+  if ! snap list amazon-ssm-agent >/dev/null 2>&1; then
+    retry snap install amazon-ssm-agent --classic
+  fi
+  if ! retry snap start --enable amazon-ssm-agent; then
+    retry systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
+  fi
+}
+
+install_node_tooling() {
+  local node_major=0
+  local nodesource_setup="/tmp/nodesource_setup.sh"
+
+  if command -v node >/dev/null 2>&1; then
+    node_major=$(node -p 'parseInt(process.versions.node.split(".")[0], 10)' 2>/dev/null || printf '0')
+  fi
+
+  if ! command -v npm >/dev/null 2>&1 || [ "$node_major" -lt 22 ]; then
+    retry curl -fsSL https://deb.nodesource.com/setup_22.x -o "$nodesource_setup"
+    retry bash "$nodesource_setup"
+    rm -f "$nodesource_setup"
+    apt_install nodejs
+  fi
+
+  npm config set fund false
+  npm config set audit false
+}
+
+install_global_npm_package() {
+  local binary_name="$1"
+  local package_name="$2"
+
+  if command -v "$binary_name" >/dev/null 2>&1; then
+    log "$binary_name is already installed"
+    return 0
+  fi
+
+  install_node_tooling
+  retry npm install -g "$package_name"
+  command -v "$binary_name" >/dev/null 2>&1
+}
+
+apt_update
+apt_install ca-certificates curl gnupg git jq unzip
+install_cloudwatch_agent
+install_aws_cli
+if [ "${enable_session_manager}" = "true" ]; then
+  install_ssm_agent
+fi
+
+EXTRA_ENV_SSM_PARAMS='${jsonencode(extra_env_var_ssm_params)}'
+if [ "$EXTRA_ENV_SSM_PARAMS" != "{}" ]; then
+  EXTRA_ENV_FILE="/etc/profile.d/extra-env-vars.sh"
+  install -m 0644 /dev/null "$EXTRA_ENV_FILE"
+  cat >"$EXTRA_ENV_FILE" <<'EXTRA_ENV_PROFILE'
+#!/bin/sh
+# Managed by EC2 bootstrap. Values are loaded from SSM Parameter Store at shell startup.
+
+load_ssm_env_var() {
+  env_name="$1"
+  parameter_name="$2"
+  aws_region="$3"
+
+  if ! command -v aws >/dev/null 2>&1; then
+    return 0
+  fi
+
+  env_value=$(aws ssm get-parameter \
+    --name "$parameter_name" \
+    --with-decryption \
+    --query Parameter.Value \
+    --output text \
+    --region "$aws_region" 2>/dev/null) || return 0
+
+  export "$env_name=$env_value"
+}
+EXTRA_ENV_PROFILE
+
+  echo "$EXTRA_ENV_SSM_PARAMS" | jq -r 'to_entries[] | @base64' | while read -r entry; do
+    ENV_NAME=$(printf '%s' "$entry" | base64 -d | jq -r '.key')
+    PARAM_NAME=$(printf '%s' "$entry" | base64 -d | jq -r '.value')
+    printf 'load_ssm_env_var %q %q %q\n' "$ENV_NAME" "$PARAM_NAME" "${aws_region}" >> "$EXTRA_ENV_FILE"
+  done
+fi
+
+# Tailscale
+if [ "${enable_tailscale}" = "true" ]; then
+  TAILSCALE_PARAM="/${name_prefix}/tailscale-auth-key"
+
+cat >/usr/local/sbin/configure-tailscale <<'TAILSCALE_SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+TAILSCALE_PARAM="__TAILSCALE_PARAM__"
+INSTANCE_NAME="__INSTANCE_NAME__"
+AWS_REGION="__AWS_REGION__"
+
+log_tailscale() {
+  printf '[configure-tailscale] %s\n' "$*" >&2
+}
+
+if ! command -v tailscale >/dev/null 2>&1; then
+  log_tailscale "tailscale is not installed; exiting"
+  exit 0
+fi
+
+wait_for_tailscaled() {
+  local max_attempts=24
+  local delay_seconds=5
+  local attempt=1
+
+  until tailscale status --json >/dev/null 2>&1; do
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      log_tailscale "tailscaled did not become ready after $attempt attempts"
+      return 1
+    fi
+
+    log_tailscale "Waiting for tailscaled"
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
+get_tailscale_backend_state() {
+  local status_json
+
+  if ! status_json=$(tailscale status --json 2>/dev/null); then
+    printf 'Unavailable'
+    return 0
+  fi
+
+  printf '%s' "$status_json" | jq -r '.BackendState // "Unknown"'
+}
+
+retry_tailscale_up() {
+  local max_attempts=5
+  local delay_seconds=10
+  local attempt=1
+
+  until tailscale up \
+    --auth-key="$TAILSCALE_AUTH_KEY" \
+    --advertise-tags=tag:ssh-enabled \
+    --hostname="$INSTANCE_NAME" \
+    --ssh; do
+    local exit_code=$?
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      log_tailscale "tailscale up failed after $attempt attempts"
+      return "$exit_code"
+    fi
+
+    log_tailscale "tailscale up failed with exit code $exit_code; retrying in $delay_seconds seconds"
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+    delay_seconds=$((delay_seconds * 2))
+  done
+}
+
+log_tailscale_up_failure() {
+  local backend_state
+
+  backend_state=$(get_tailscale_backend_state)
+  log_tailscale "tailscale up failed; backend state after failed attempt: $backend_state"
+  log_tailscale "Tailscale auth key SSM parameter path: $TAILSCALE_PARAM"
+  log_tailscale "Check that the instance role allows ssm:GetParameter for $TAILSCALE_PARAM."
+  log_tailscale "If $TAILSCALE_PARAM uses a customer-managed KMS key, check that the instance role allows kms:Decrypt for that key."
+  log_tailscale "Check that the Tailscale auth key is valid, not expired, and not already consumed if it is one-time-use."
+  log_tailscale "Check Tailscale ACL tag ownership allows this auth key to advertise tag:ssh-enabled."
+}
+
+get_tailscale_auth_key() {
+  local auth_key
+
+  if ! auth_key=$(aws ssm get-parameter \
+    --name "$TAILSCALE_PARAM" \
+    --with-decryption \
+    --query Parameter.Value \
+    --output text \
+    --region "$AWS_REGION" 2>&1); then
+    log_tailscale "Failed to read Tailscale auth key from SSM Parameter Store at $TAILSCALE_PARAM in $AWS_REGION: $auth_key"
+    return 1
+  fi
+
+  printf '%s' "$auth_key"
+}
+
+is_valid_tailscale_auth_key() {
+  local auth_key="$1"
+  [ -n "$auth_key" ] && \
+    [ "$auth_key" != "None" ] && \
+    [ "$auth_key" != "replace_with_auth_key" ] && \
+    [[ "$auth_key" == tskey-* ]]
+}
+
+if ! TAILSCALE_AUTH_KEY=$(get_tailscale_auth_key); then
+  exit 1
+fi
+
+if ! is_valid_tailscale_auth_key "$TAILSCALE_AUTH_KEY"; then
+  log_tailscale "SSM Parameter Store does not contain a valid Tailscale auth key at $TAILSCALE_PARAM. Update the SecureString value; systemd will retry this service automatically."
+  log_tailscale "Check that the auth key is valid, not expired, and not already consumed if it is one-time-use."
+  log_tailscale "Check Tailscale ACL tag ownership allows this auth key to advertise tag:ssh-enabled."
+  exit 1
+fi
+
+wait_for_tailscaled
+
+sleep 10
+
+TAILSCALE_BACKEND_STATE=$(get_tailscale_backend_state)
+log_tailscale "Tailscale backend state: $TAILSCALE_BACKEND_STATE"
+
+if [ "$TAILSCALE_BACKEND_STATE" = "Running" ]; then
+  log_tailscale "Tailscale is connected and valid; skipping re-auth"
+else
+  log_tailscale "Tailscale is not connected (state: $TAILSCALE_BACKEND_STATE); clearing state and re-authenticating"
+  systemctl stop tailscaled
+  rm -f /var/lib/tailscale/tailscaled.state
+  systemctl start tailscaled
+  wait_for_tailscaled
+
+  if ! retry_tailscale_up; then
+    log_tailscale_up_failure
+    exit 1
+  fi
+fi
+
+if ! tailscale set --ssh; then
+  log_tailscale "WARNING: tailscale set --ssh failed; continuing because tailscale up already used --ssh"
+fi
+
+if ! TAILSCALE_BACKEND_STATE=$(tailscale status --json | jq -r '.BackendState // "Unknown"'); then
+  TAILSCALE_BACKEND_STATE="Unavailable"
+fi
+log_tailscale "Tailscale backend state after configuration: $TAILSCALE_BACKEND_STATE"
+if [ "$TAILSCALE_BACKEND_STATE" != "Running" ]; then
+  log_tailscale "Tailscale is not running after configuration; backend state is $TAILSCALE_BACKEND_STATE. Check daemon readiness, SSM access to $TAILSCALE_PARAM, KMS decrypt permission if using a customer-managed key, auth key validity/expiry/reuse, and Tailscale ACL tag ownership for tag:ssh-enabled."
+  exit 1
+fi
+TAILSCALE_SCRIPT
+
+sed -i \
+  -e "s|__TAILSCALE_PARAM__|$TAILSCALE_PARAM|g" \
+  -e "s|__INSTANCE_NAME__|${instance_name}|g" \
+  -e "s|__AWS_REGION__|${aws_region}|g" \
+  /usr/local/sbin/configure-tailscale
+chmod 0700 /usr/local/sbin/configure-tailscale
+
+cat >/etc/systemd/system/configure-tailscale.service <<'TAILSCALE_SERVICE'
+[Unit]
+Description=Configure Tailscale with Tailscale SSH
+After=network-online.target tailscaled.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/configure-tailscale
+Restart=on-failure
+RestartSec=5min
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=multi-user.target
+TAILSCALE_SERVICE
+
+cat >/etc/systemd/system/configure-tailscale.timer <<'TAILSCALE_TIMER'
+[Unit]
+Description=Run Tailscale health check every 60 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=60min
+Persistent=true
+Unit=configure-tailscale.service
+
+[Install]
+WantedBy=timers.target
+TAILSCALE_TIMER
+
+systemctl daemon-reload
+systemctl enable configure-tailscale.service
+
+TAILSCALE_INSTALLED=false
+TAILSCALED_STARTED=false
+
+if install_tailscale; then
+  TAILSCALE_INSTALLED=true
+else
+  log "WARNING: Tailscale install failed after retries; continuing bootstrap without Tailscale"
+fi
+
+if [ "$TAILSCALE_INSTALLED" = "true" ]; then
+  rm -rf /etc/systemd/system/tailscaled.service.d
+  systemctl daemon-reload
+
+  if retry systemctl enable --now tailscaled; then
+    if retry systemctl restart tailscaled; then
+      TAILSCALED_STARTED=true
+    else
+      log "WARNING: tailscaled failed to restart; continuing bootstrap without Tailscale configuration"
+    fi
+  else
+    log "WARNING: tailscaled failed to enable/start after retries; continuing bootstrap without Tailscale configuration"
+  fi
+fi
+
+if [ "$TAILSCALE_INSTALLED" = "true" ] && [ "$TAILSCALED_STARTED" = "true" ]; then
+  log "Running Tailscale authentication/configuration"
+  if /usr/local/sbin/configure-tailscale; then
+    log "Tailscale authentication/configuration completed"
+  else
+    log "WARNING: Tailscale authentication/configuration failed; update the SSM auth key if needed and check journalctl -u configure-tailscale.service. The timer will retry automatically."
+  fi
+  systemctl enable --now configure-tailscale.timer
+elif [ "$TAILSCALE_INSTALLED" != "true" ]; then
+  log "WARNING: Skipping configure-tailscale.service because tailscale binary is unavailable"
+else
+  log "WARNING: Skipping configure-tailscale.service because tailscaled did not start successfully"
+fi
+fi # end enable_tailscale
+
+# VS Code is enabled by default through developer_config.
+if [ "${install_vscode}" = "true" ] && ! command -v code >/dev/null 2>&1; then
+  VSCODE_ARCH=$(dpkg --print-architecture)
+  retry curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+    -o /tmp/microsoft.asc
+  gpg --batch --yes --dearmor \
+    -o /usr/share/keyrings/packages.microsoft.gpg \
+    /tmp/microsoft.asc
+  rm -f /tmp/microsoft.asc
+  printf 'deb [arch=%s signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main\n' "$VSCODE_ARCH" \
+    > /etc/apt/sources.list.d/vscode.list
+  apt_update
+  apt_install code
+fi
+
+if [ "${install_vscode}" = "true" ]; then
+  command -v code >/dev/null 2>&1
+fi
+
+# Optional coding agents. These use the official npm packages and are disabled by default.
+if [ "${install_claude_code}" = "true" ]; then
+  install_global_npm_package claude @anthropic-ai/claude-code
+fi
+
+if [ "${install_codex_cli}" = "true" ]; then
+  install_global_npm_package codex @openai/codex
+fi
+
+log "Bootstrap complete"

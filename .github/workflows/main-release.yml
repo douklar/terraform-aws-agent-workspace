@@ -1,0 +1,143 @@
+name: Release main
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ closed ]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: main-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Create semantic release
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next semantic version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force
+
+          pr_title="$(jq -r '.pull_request.title // ""' "${GITHUB_EVENT_PATH}")"
+          pr_body="$(jq -r '.pull_request.body // ""' "${GITHUB_EVENT_PATH}")"
+          base_sha="$(jq -r '.pull_request.base.sha // ""' "${GITHUB_EVENT_PATH}")"
+          merge_sha="$(jq -r '.pull_request.merge_commit_sha // ""' "${GITHUB_EVENT_PATH}")"
+
+          title_regex='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([A-Za-z0-9._/-]+\))?(!)?: .+'
+          if [[ ! "${pr_title}" =~ ${title_regex} ]]; then
+            echo "PR title must follow Conventional Commits, for example: feat: add workspace module" >&2
+            echo "Current title: ${pr_title}" >&2
+            exit 1
+          fi
+
+          commit_messages=""
+          if [[ -n "${base_sha}" && -n "${merge_sha}" ]]; then
+            commit_messages="$(git log --format='%s%n%b' "${base_sha}..${merge_sha}" 2>/dev/null || true)"
+          fi
+
+          release_text="${pr_title}"$'\n'"${pr_body}"$'\n'"${commit_messages}"
+          bump_type="patch"
+
+          if grep -Eqi '^[A-Za-z0-9_-]+(\([^)]+\))?!:' <<< "${release_text}"; then
+            bump_type="major"
+          elif grep -Eq '^BREAKING CHANGE:' <<< "${release_text}"; then
+            bump_type="major"
+          elif grep -Eqi '^feat(\([^)]+\))?:' <<< "${release_text}"; then
+            bump_type="minor"
+          elif grep -Eqi '^(fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?:' <<< "${release_text}"; then
+            bump_type="patch"
+          else
+            echo "Unable to determine release bump from PR title or commits." >&2
+            exit 1
+          fi
+
+          # Detect pre-release label from PR title or body.
+          # Supported markers: [alpha], [beta], [rc], [pre-release] (defaults to beta).
+          # Examples:
+          #   feat: add new scheduler [beta]
+          #   fix: patch thing [rc]
+          is_prerelease="false"
+          pre_label="beta"
+          combined="${pr_title}"$'\n'"${pr_body}"
+          if grep -Eqi '\[alpha\]' <<< "${combined}"; then
+            is_prerelease="true"; pre_label="alpha"
+          elif grep -Eqi '\[beta\]' <<< "${combined}"; then
+            is_prerelease="true"; pre_label="beta"
+          elif grep -Eqi '\[rc\]' <<< "${combined}"; then
+            is_prerelease="true"; pre_label="rc"
+          elif grep -Eqi '\[pre-release\]' <<< "${combined}"; then
+            is_prerelease="true"; pre_label="beta"
+          fi
+
+          # Use only stable tags (no pre-release suffix) to calculate the next version.
+          latest_tag="$(git tag -l --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)"
+
+          if [[ -z "${latest_tag}" ]]; then
+            next_base="v1.0.0"
+          else
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "${version}"
+
+            case "${bump_type}" in
+              major) next_base="v$((major + 1)).0.0" ;;
+              minor) next_base="v${major}.$((minor + 1)).0" ;;
+              patch) next_base="v${major}.${minor}.$((patch + 1))" ;;
+            esac
+          fi
+
+          if [[ "${is_prerelease}" == "true" ]]; then
+            # Count existing pre-release tags for this base+label and increment.
+            existing="$(git tag -l | grep -cE "^${next_base}-${pre_label}\.[0-9]+$" || true)"
+            next_tag="${next_base}-${pre_label}.$((existing + 1))"
+          else
+            next_tag="${next_base}"
+          fi
+
+          echo "tag_name=${next_tag}" >> "${GITHUB_OUTPUT}"
+          echo "bump_type=${bump_type}" >> "${GITHUB_OUTPUT}"
+          echo "is_prerelease=${is_prerelease}" >> "${GITHUB_OUTPUT}"
+          echo "merge_sha=${merge_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_name="${{ steps.version.outputs.tag_name }}"
+          target_sha="${{ steps.version.outputs.merge_sha }}"
+
+          if [[ -z "${target_sha}" ]]; then
+            target_sha="${GITHUB_SHA}"
+          fi
+
+          if git rev-parse --verify --quiet "refs/tags/${tag_name}" >/dev/null; then
+            echo "Tag already exists: ${tag_name}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${tag_name}" "${target_sha}"
+          git push origin "${tag_name}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          generate_release_notes: true
+          prerelease: ${{ steps.version.outputs.is_prerelease == 'true' }}

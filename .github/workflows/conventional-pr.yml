@@ -1,0 +1,42 @@
+name: Conventional PR
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ opened, edited, synchronize, reopened, ready_for_review ]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  title:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require Conventional Commit title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          title_regex='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([A-Za-z0-9._/-]+\))?(!)?: .+'
+
+          if [[ ! "${PR_TITLE}" =~ ${title_regex} ]]; then
+            echo "PR titles targeting main must follow Conventional Commits." >&2
+            echo "" >&2
+            echo "Allowed examples:" >&2
+            echo "- feat: add EC2 workspace module" >&2
+            echo "- fix: correct Tailscale bootstrap retry" >&2
+            echo "- docs: update module usage examples" >&2
+            echo "- chore: update Terraform provider constraints" >&2
+            echo "- feat!: remove deprecated input" >&2
+            echo "" >&2
+            echo "Release mapping:" >&2
+            echo "- type! or BREAKING CHANGE: major version" >&2
+            echo "- feat: minor version" >&2
+            echo "- fix/docs/style/refactor/perf/test/build/ci/chore/revert: patch version" >&2
+            echo "Current title: ${PR_TITLE}" >&2
+            exit 1
+          fi

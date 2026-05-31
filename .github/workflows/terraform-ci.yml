@@ -1,0 +1,86 @@
+name: Terraform CI
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '*.tf'
+      - '*.tfvars'
+      - 'examples/**'
+      - 'lambda/**'
+      - 'modules/ec2-instance/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    env:
+      TF_IN_AUTOMATION: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.12.2
+
+      - name: Terraform format check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform init root example
+        run: terraform -chdir=examples/basic init -backend=false -input=false
+
+      - name: Terraform validate root example
+        run: terraform -chdir=examples/basic validate
+
+      - name: Terraform init EC2 example
+        run: terraform -chdir=modules/ec2-instance/examples/basic init -backend=false -input=false
+
+      - name: Terraform validate EC2 example
+        run: terraform -chdir=modules/ec2-instance/examples/basic validate
+
+      - name: Check tracked Python bytecode
+        run: |
+          set -euo pipefail
+          tracked_bytecode="$(git ls-files | grep -E '(^|/)__pycache__/|\.pyc$' || true)"
+          if [ -n "$tracked_bytecode" ]; then
+            echo "Tracked Python bytecode is not allowed:"
+            echo "$tracked_bytecode"
+            exit 1
+          fi
+
+      - name: Compile Lambda Python
+        run: python -m py_compile lambda/*.py
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v6
+
+      - name: Init TFLint
+        run: tflint --init
+
+      - name: Run TFLint
+        run: tflint --recursive
+
+      - name: Run Trivy IaC scanner
+        uses: aquasecurity/trivy-action@0.31.0
+        with:
+          scan-type: config
+          scan-ref: .
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .

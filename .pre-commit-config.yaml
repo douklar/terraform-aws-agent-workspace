@@ -1,0 +1,29 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.93.0
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+        args:
+          - --hook-config=--retry-once-with-cleanup=true
+
+  - repo: local
+    hooks:
+      - id: conventional-commit-message
+        name: Conventional commit message
+        entry: python .pre-commit-hooks/conventional_commit_msg.py
+        language: system
+        stages: [commit-msg]

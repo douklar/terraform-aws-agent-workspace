@@ -42,3 +42,61 @@ terraform.rc
 # Optional: ignore plan files saved before destroying Terraform configuration
 # Uncomment the line below if you want to ignore planout files.
 # planout
+
+# Workspace-local and generated artifacts
+.vscode/
+lambda/*.zip
+# Prevent committing repository-local scripts (may contain tokens or be sensitive)
+scripts/
+
+# -----------------
+# Python
+# -----------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.pywave
+.hypothesis/
+.pytest_cache/
+cover/
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.mypy_cache/
+.pyre/
+.pytype/
+cython_debug/
+
+lambda/__pycache__/

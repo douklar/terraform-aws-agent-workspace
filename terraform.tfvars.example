@@ -1,0 +1,55 @@
+# Example variables for local onboarding
+aws_region                    = "eu-central-1"
+name_prefix                   = "workspace"
+instance_name                 = "workspace-ec2"
+instance_type                 = "m7i-flex.large"
+# Default VPC quickstarts usually need a public IP for outbound bootstrap
+# because there is no NAT Gateway. Use false with a private subnet that has NAT/proxy egress.
+associate_public_ip           = true
+environment                   = "dev"
+cost_center                   = "engineering"
+owner_email                   = "owner@example.com"
+developer_config = {
+  install_vscode      = true
+  enable_tailscale    = true
+  install_claude_code = true
+  install_codex_cli   = false
+}
+
+# Optional SSM-backed secret environment variables. Terraform creates placeholder
+# SecureString parameters; replace the values in SSM after apply.
+# extra_env_vars = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+
+# Or reference existing SecureString parameter names that are managed elsewhere.
+# extra_env_var_parameter_names = {
+#   API_KEY = "/workspace/runtime/API_KEY"
+# }
+
+enable_manual_ami_copy        = true
+enable_manual_ami_export      = true
+create_manual_export_s3_bucket = true
+manual_export_s3_prefix       = "ami-exports"
+manual_export_disk_format     = "VMDK"
+manual_export_role_name       = "vmimport"
+
+# Optional automated jobs. Start/stop schedules are always created.
+# Cost-generating backup and patching jobs default to disabled.
+# scheduler_features = {
+#   reconcile       = true
+#   daily_snapshots = false
+#   weekly_amis     = false
+#   monthly_amis    = false
+#   backup_cleanup  = false
+#   security_update = false
+# }
+
+# Optional instance schedule. Times are 24-hour HH:MM values in each window timezone.
+# instance_schedule_windows = [
+#   {
+#     name       = "business_hours"
+#     timezone   = "Europe/Berlin"
+#     days       = ["MON", "TUE", "WED", "THU", "FRI"]
+#     start_time = "09:00"
+#     stop_time  = "17:30"
+#   }
+# ]
