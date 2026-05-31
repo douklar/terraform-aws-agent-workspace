@@ -1,147 +1,127 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/douklar/douklar/main/assets/logo.png" />
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/douklar/douklar/main/assets/logo-for-light-mode.png" />
-    <img src="https://raw.githubusercontent.com/douklar/douklar/main/assets/logo.png" alt="Douklar DevOps Tools Logo" width="300" />
-  </picture>
+  <img src="https://raw.githubusercontent.com/douklar/douklar/main/assets/logo.png" alt="Douklar DevOps Tools" width="260" />
 </p>
 
-<h1 align="center">Agent Workspace</h1>
+<h1 align="center">terraform-aws-agent-workspace</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Terraform-7B42BC?style=flat&logo=terraform&logoColor=white" alt="Terraform" />
-  &nbsp;
-  <img src="https://img.shields.io/badge/AWS-232F3E?style=flat&logo=amazonaws&logoColor=white" alt="AWS" />
+  <img src="https://img.shields.io/badge/Terraform-%3E%3D1.9-7B42BC?style=flat-square&logo=terraform&logoColor=white" alt="Terraform >= 1.9" />
+  <img src="https://img.shields.io/badge/AWS%20Provider-~%3E%206.47-FF9900?style=flat-square&logo=amazonaws&logoColor=white" alt="AWS Provider ~> 6.47" />
+  <img src="https://img.shields.io/badge/Ubuntu-24.04%20LTS-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS" />
+  <img src="https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square" alt="Apache 2.0" />
 </p>
 
 <p align="center">
-  <strong>Part of the Douklar DevOps Tools series.</strong>
+  A Terraform module that provisions a personal AI agent workspace on AWS — an Ubuntu 24.04 EC2 instance with Claude Code, VS Code Server, and Tailscale pre-installed, accessed securely through AWS Session Manager with no open ports.
 </p>
 
 <p align="center">
-  A Terraform module that deploys a personal AI agent workspace on AWS — an Ubuntu EC2 instance that automatically starts in the evening, stops at night, stays backed up, and is accessible via browser-based terminal without opening any ports.
+  <em>Part of the <strong>Douklar DevOps Tools</strong> series.</em>
 </p>
-
-> **Designed for:** developers who want a cloud workstation for running AI agents (Claude Code, Codex, etc.) without spending time on AWS infrastructure research.
 
 ---
 
-## What it does
+## Overview
 
-- Launches an Ubuntu 24.04 EC2 instance with Claude Code, VS Code Server, and Tailscale pre-installed
-- Automatically starts and stops the instance on your schedule (saves ~70% on EC2 costs)
-- Connects via AWS Session Manager — no SSH keys, no open ports, no VPN required
-- Takes weekly AMI snapshots so you can roll back if something breaks
-- Sends a budget alert if your AWS bill goes over a limit you set
+This module is designed for developers who want a ready-to-use cloud workstation for running AI agents (Claude Code, Codex, etc.) without investing time in AWS infrastructure setup.
+
+| Capability | Detail |
+|:---|:---|
+| **Zero-exposure access** | AWS Session Manager and Tailscale — no SSH keys, no inbound ports required |
+| **Cost-optimized scheduling** | Automatic start/stop on your schedule, reducing EC2 costs by ~70% |
+| **Pre-installed tooling** | Claude Code, VS Code Server, Tailscale; optional OpenAI Codex CLI |
+| **Secrets management** | API keys stored in AWS SSM Parameter Store — Terraform never sees the values |
+| **Automated backups** | Daily EBS snapshots, weekly and monthly AMIs with configurable retention |
+| **Encryption by default** | EBS, SSM parameters, SQS, and S3 are all encrypted without a custom KMS key |
+| **Budget protection** | Native AWS Budgets alert at a cost threshold you define |
 
 ---
 
-## Quick start
+## Usage
 
 ```hcl
-terraform {
-  required_version = ">= 1.9.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-    archive = {
-      source  = "hashicorp/archive"
-      version = "~> 2.5"
-    }
-  }
-}
-
-provider "aws" {
-  region = "eu-central-1"
-}
-
 module "workspace" {
-  # Terraform Registry (recommended once published):
   source  = "YOUR_NAMESPACE/agent-workspace/aws"
   version = "~> 1.0"
-
-  # Or directly from GitHub without publishing to the registry:
-  # source = "github.com/YOUR_ORG/terraform-aws-agent-workspace?ref=v1.0.0"
 
   aws_region = "eu-central-1"
 }
 ```
 
-That's it. Everything else has a sensible default. Run `terraform init && terraform apply`.
+Run `terraform init && terraform apply`. All variables have sensible defaults.
 
-After apply, connect to your instance:
+Connect to your instance after apply:
 
 ```bash
 aws ssm start-session --target <instance_id> --region eu-central-1
 ```
 
-The instance ID is shown in the `instance_id` output.
+The instance ID is printed as a Terraform output.
 
 ---
 
-## Set your timezone and schedule
+## Configuration
 
-The default schedule runs in `Europe/Rome`. Change it to match where you live:
+### Schedule
+
+The instance starts and stops automatically according to configurable time windows. The default schedule runs in `Europe/Berlin` on weekday evenings and weekends.
 
 ```hcl
 module "workspace" {
-  source = "..."
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
 
-  aws_region = "us-east-1"
+  aws_region = "eu-central-1"
 
   instance_schedule_windows = [
     {
       name       = "evenings"
-      timezone   = "America/New_York"
+      timezone   = "Europe/Berlin"
       days       = ["MON", "TUE", "WED", "THU", "FRI"]
-      start_time = "17:00"
+      start_time = "18:30"
       stop_time  = "23:00"
     },
     {
       name       = "weekends"
-      timezone   = "America/New_York"
+      timezone   = "Europe/Berlin"
       days       = ["SAT", "SUN"]
-      start_time = "10:00"
+      start_time = "11:00"
       stop_time  = "22:00"
     }
   ]
 }
 ```
 
-Timezone names follow the [IANA tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — for example `Europe/Berlin`, `America/Los_Angeles`, `Asia/Tokyo`.
+Timezone strings follow the [IANA tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — for example `Europe/Berlin`, `Europe/London`, `Asia/Tokyo`.
 
----
-
-## Common configurations
-
-### Need more disk or CPU?
+### Instance size
 
 ```hcl
 module "workspace" {
-  source = "..."
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
 
-  instance_type = "m7i-flex.xlarge"   # 4 vCPU, 16 GB RAM
-  storage       = { size_gb = 100 }   # 100 GB disk (default: 30 GB)
+  instance_type = "m7i-flex.xlarge"  # 4 vCPU, 16 GB RAM
+  storage       = { size_gb = 100 }  # default: 30 GB
 }
 ```
 
-Supported instance families: `t3`, `t3a`, `m5`, `m6i`, `m7i`, `m7i-flex`, `c5`, `c6i`, `c7i`, `r5`, `r6i`, `r7i`.
+Supported families: `t3`, `t3a`, `m5`, `m6i`, `m7i`, `m7i-flex`, `c5`, `c6i`, `c7i`, `r5`, `r6i`, `r7i`.
 
-### Store API keys securely
+### API keys and secrets
 
-The module creates encrypted parameter placeholders in AWS. You fill in the real values after deploy — Terraform never sees or stores the secrets.
+The module creates encrypted SSM Parameter Store placeholders. Terraform never reads or stores the secret values — you populate them after apply.
 
 ```hcl
 module "workspace" {
-  source = "..."
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
 
   extra_env_vars = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"]
 }
 ```
 
-After `terraform apply`, set each key:
+After `terraform apply`, write each value:
 
 ```bash
 aws ssm put-parameter \
@@ -152,11 +132,29 @@ aws ssm put-parameter \
   --region eu-central-1
 ```
 
-The instance loads these automatically at shell startup. Change `workspace` to your `name_prefix` if you set one.
+The instance loads all injected variables automatically at shell startup. Replace `workspace` with your `name_prefix` if you customized it.
 
-### Connect with Tailscale
+### Developer tooling
 
-Tailscale is installed by default. After `terraform apply`, set your auth key:
+All tools except Codex CLI are enabled by default. Override to control what gets installed:
+
+```hcl
+module "workspace" {
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
+
+  developer_config = {
+    install_vscode      = true   # VS Code Server
+    enable_tailscale    = true   # Tailscale mesh VPN
+    install_claude_code = true   # Claude Code CLI
+    install_codex_cli   = false  # OpenAI Codex CLI (disabled by default)
+  }
+}
+```
+
+### Tailscale
+
+Tailscale is installed and enabled by default. After `terraform apply`, write your auth key:
 
 ```bash
 aws ssm put-parameter \
@@ -167,55 +165,72 @@ aws ssm put-parameter \
   --region eu-central-1
 ```
 
-Then reboot or restart the Tailscale service on the instance. The instance will appear in your Tailscale network — no open ports needed.
+Reboot or restart the Tailscale service on the instance to activate. The instance joins your Tailscale network with no inbound ports open.
 
-To disable Tailscale:
-
-```hcl
-developer_config = { enable_tailscale = false }
-```
-
-### Enable automated backups
+### Automated backups
 
 ```hcl
-scheduler_features = {
-  weekly_amis    = true   # AMI every Sunday night
-  backup_cleanup = true   # auto-delete old AMIs
-  security_update = true  # apply security patches weekly
+module "workspace" {
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
+
+  scheduler_features = {
+    daily_snapshots               = true            # nightly EBS snapshot
+    weekly_amis                   = true            # full AMI every Sunday
+    monthly_amis                  = true            # full AMI on the 1st
+    backup_cleanup                = true            # auto-expire old backups
+    security_update               = true            # weekly security patches
+    daily_snapshot_retention_days = 7
+    monthly_ami_retention_days    = 30
+    maintenance_timezone          = "Europe/Berlin"
+  }
 }
 ```
 
-By default, weekly AMIs are kept for 7 days and monthly AMIs for 365 days. To keep them longer:
+**`scheduler_features` options:**
+
+| Option | Default | Description |
+|:---|:---:|:---|
+| `reconcile` | `true` | Keep instance state in sync with the schedule |
+| `daily_snapshots` | `false` | Take a nightly EBS snapshot |
+| `weekly_amis` | `false` | Create a full AMI every Sunday night |
+| `monthly_amis` | `false` | Create a full AMI on the 1st of each month |
+| `backup_cleanup` | `false` | Auto-delete backups past the retention period |
+| `security_update` | `false` | Apply security patches on a weekly schedule |
+| `maintenance_timezone` | `Europe/Berlin` | Timezone for all maintenance jobs |
+| `daily_snapshot_retention_days` | `7` | Days to retain daily EBS snapshots |
+| `monthly_ami_retention_days` | `30` | Days to retain monthly AMIs |
+
+### Budget alert
 
 ```hcl
-scheduler_features = {
-  weekly_amis                  = true
-  backup_cleanup               = true
-  daily_snapshot_retention_days = 14
-  monthly_ami_retention_days    = 730
+module "workspace" {
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
+
+  cost_report = {
+    enabled                  = true
+    email_addresses          = ["you@example.com"]
+    monthly_budget_limit_usd = 50
+    alert_threshold_percent  = 80  # sends alert at $40
+  }
 }
 ```
 
-### Set a budget alert
+### Customer-managed KMS key
+
+All resources use AWS-managed keys by default. To use your own KMS key across all resources:
 
 ```hcl
-cost_report = {
-  enabled                  = true
-  email_addresses          = ["you@example.com"]
-  monthly_budget_limit_usd = 50
-  alert_threshold_percent  = 80   # alert at $40
+module "workspace" {
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
+
+  kms_key_arn = "arn:aws:kms:eu-central-1:123456789012:key/mrk-abc123"
 }
 ```
 
-### Use your own KMS key for encryption
-
-Everything is encrypted with AWS-managed keys by default. To use your own KMS key for all resources:
-
-```hcl
-kms_key_arn = "arn:aws:kms:eu-central-1:123456789012:key/mrk-abc123"
-```
-
-This applies to: EBS volume, SSM parameters, SQS queues, S3 export bucket, and CloudWatch logs.
+This applies to: EBS volume, SSM parameters, SQS queues, S3 export bucket, and CloudWatch Logs.
 
 ---
 
@@ -223,93 +238,115 @@ This applies to: EBS volume, SSM parameters, SQS queues, S3 export bucket, and C
 
 The instance is **private by default** — no public IP, no open inbound ports.
 
-Access works through two channels that don't need open ports:
-- **AWS Session Manager** — browser or CLI terminal, enabled by default
-- **Tailscale** — mesh VPN, optional
+| Access method | Description | Requirement |
+|:---|:---|:---|
+| AWS Session Manager | Browser or CLI terminal via IAM-authenticated SSM | IAM permissions |
+| Tailscale | Encrypted mesh VPN, peer-to-peer | Auth key written to SSM |
 
-If you're using the default VPC without a NAT Gateway, set:
+If you are using the default VPC without a NAT Gateway, the instance needs a public IP to reach AWS endpoints:
 
 ```hcl
-associate_public_ip = true
+module "workspace" {
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
+
+  associate_public_ip = true
+}
 ```
 
-For existing VPC/subnet infrastructure:
+For an existing VPC and subnet:
 
 ```hcl
-vpc_id    = "vpc-0abc123"
-subnet_id = "subnet-0abc123"
+module "workspace" {
+  source  = "YOUR_NAMESPACE/agent-workspace/aws"
+  version = "~> 1.0"
+
+  vpc_id    = "vpc-0abc123"
+  subnet_id = "subnet-0abc123"
+}
 ```
 
 ---
 
-## All options at a glance
+## Inputs
 
-| Variable | Default | What it does |
-|---|---|---|
-| `aws_region` | `eu-central-1` | Where to deploy |
-| `name_prefix` | `workspace` | Prefix for all resource names |
+Full descriptions and validation rules are in [variables.tf](variables.tf).
+
+| Name | Default | Description |
+|:---|:---|:---|
+| `aws_region` | `eu-central-1` | AWS region to deploy into |
+| `name_prefix` | `workspace` | Prefix applied to all resource names |
 | `instance_name` | `workspace-ec2` | Name tag on the EC2 instance |
-| `instance_type` | `m7i-flex.large` | CPU / RAM size |
-| `storage` | `{ size_gb=30, encrypted=true }` | Disk size and encryption |
-| `associate_public_ip` | `false` | Attach a public IP |
-| `vpc_id` | `null` (default VPC) | VPC to deploy into |
-| `subnet_id` | `null` (first subnet) | Specific subnet |
-| `ami_id` | `null` (latest Ubuntu 24.04) | Pin a specific AMI |
-| `developer_config` | All tools enabled | What to install at boot |
-| `instance_schedule_windows` | Evenings + weekends, Rome | When the instance runs |
-| `scheduler_features` | Reconcile only | Backups, patches, cleanup |
-| `extra_env_vars` | `[]` | API keys to inject as env vars |
-| `kms_key_arn` | `null` (AWS-managed keys) | Your own KMS key |
-| `cost_report` | Disabled | AWS Budgets email alert |
-| `ami_transfer` | Disabled | Copy or export AMIs |
-| `enable_session_manager` | `true` | Browser/CLI terminal access |
-| `tags` | `{}` | Extra tags on all resources |
+| `instance_type` | `m7i-flex.large` | EC2 instance type |
+| `storage` | `{ size_gb=30, encrypted=true }` | Root EBS volume size and encryption |
+| `associate_public_ip` | `false` | Attach a public IPv4 address |
+| `vpc_id` | `null` | VPC to deploy into (`null` = default VPC) |
+| `subnet_id` | `null` | Subnet to use (`null` = first available) |
+| `security_group_ids` | `[]` | Security group override (module creates one if empty) |
+| `ingress_ports` | `[]` | Additional inbound security group rules |
+| `egress_ports` | `443, 80, 41641/udp` | Outbound security group rules |
+| `ami_id` | `null` | AMI override (`null` = latest Ubuntu 24.04 LTS) |
+| `developer_config` | all tools enabled | Tooling installed at boot |
+| `instance_schedule_windows` | Evenings + weekends, Berlin | Start/stop schedule windows |
+| `scheduler_features` | reconcile only | Backup, patch, and cleanup jobs |
+| `extra_env_vars` | `[]` | Create SSM placeholders for environment variables |
+| `extra_env_var_parameter_names` | `{}` | Map env var names to existing SSM parameters |
+| `kms_key_arn` | `null` | Customer-managed KMS key ARN |
+| `cost_report` | disabled | AWS Budgets cost alert |
+| `ami_transfer` | disabled | AMI copy or export configuration |
+| `enable_session_manager` | `true` | Enable AWS Session Manager access |
+| `environment` | `dev` | Environment tag (`dev`, `staging`, `prod`) |
+| `cost_center` | `engineering` | Cost center tag for billing attribution |
+| `owner_email` | `owner@example.com` | Owner tag for operational responsibility |
+| `tags` | `{}` | Additional tags applied to all resources |
 
 ---
 
-## Encryption defaults (no KMS key needed)
+## Encryption reference
 
-| Resource | Encrypted without KMS? |
-|---|---|
-| EBS root volume | Yes — AWS-managed EBS key |
-| SSM parameters | Yes — AWS-managed SSM key |
-| SQS queues | Yes — SQS-managed SSE (free) |
-| S3 export bucket | Yes — SSE-S3 (AES-256) |
-| CloudWatch logs | No — AWS requires a KMS key for log group encryption |
+| Resource | Default encryption | Supports KMS override |
+|:---|:---|:---:|
+| EBS root volume | AWS-managed EBS key | Yes |
+| SSM parameters | AWS-managed SSM key | Yes |
+| SQS queues | SSE-SQS (no additional cost) | Yes |
+| S3 export bucket | SSE-S3 (AES-256) | Yes |
+| CloudWatch Logs | None by default | Yes (required for log encryption) |
 
 ---
 
 ## After apply checklist
 
-1. **Set your Tailscale auth key** (if `developer_config.enable_tailscale = true`)
-2. **Set your API keys** (if you used `extra_env_vars`)
-3. **Connect**: `aws ssm start-session --target <instance_id>`
-4. The instance starts automatically at your scheduled time
+1. If `developer_config.enable_tailscale = true` — write the Tailscale auth key to SSM
+2. If `extra_env_vars` is configured — write each secret value to SSM
+3. Connect: `aws ssm start-session --target <instance_id> --region eu-central-1`
+4. The instance starts automatically at the next scheduled window
 
 ---
 
 ## Requirements
 
-| Tool | Version |
-|---|---|
+| Requirement | Version |
+|:---|:---|
 | Terraform | `>= 1.9.0, < 2.0.0` |
-| AWS provider | `~> 5.0` |
-| Archive provider | `~> 2.5` |
-| AWS CLI | Any recent version (for SSM sessions) |
+| AWS Provider | `~> 6.47` |
+| Archive Provider | `~> 2.5` |
+| AWS CLI | Any recent version (for `ssm start-session`) |
 
-AWS credentials must have permission to create EC2, IAM, Lambda, EventBridge, SQS, SSM, and CloudWatch resources.
+AWS credentials must have permission to create and manage: EC2, IAM, Lambda, EventBridge, SQS, SSM Parameter Store, S3, and CloudWatch.
 
 ---
 
-## Manual AMI export (advanced)
+## Advanced: AMI export
 
-If `ami_transfer.enable_export = true`, AWS requires a pre-existing IAM role named `vmimport` (configurable via `ami_transfer.export_role_name`). This role must trust `vmie.amazonaws.com`. See the [AWS VM Import/Export documentation](https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html) for the exact trust policy and permissions.
+When `ami_transfer.enable_export = true`, AWS VM Import/Export requires a pre-existing IAM role named `vmimport` (configurable via `ami_transfer.export_role_name`). The role must trust the `vmie.amazonaws.com` service principal.
+
+See [AWS VM Import/Export — Required permissions](https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html) for the exact trust policy and S3 bucket policy.
 
 ---
 
 ## Submodule
 
-The EC2 instance layer is also available as a standalone submodule in `modules/ec2-instance` — useful if you only need the instance without the scheduler, backups, and AMI transfer infrastructure.
+`modules/ec2-instance` is available as a standalone module for cases where you need only the EC2 instance without the scheduler, backup, and AMI transfer infrastructure.
 
 ---
 
@@ -319,7 +356,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 
