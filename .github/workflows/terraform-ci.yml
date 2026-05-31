@@ -73,7 +73,7 @@ jobs:
         run: tflint --recursive
 
       - name: Run Trivy IaC scanner
-        uses: aquasecurity/trivy-action@0.31.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
