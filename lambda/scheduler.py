@@ -24,10 +24,19 @@ if not logger.handlers:
 ec2 = boto3.client("ec2")
 ssm = boto3.client("ssm")
 
+# The scheduler manages every EC2 instance that carries this tag KEY. The tag
+# VALUE selects the per-instance mode (read fresh on every invocation, so tag
+# edits take effect in realtime). This makes the scheduler reusable: tag any
+# instance with `scheduler=<mode>` and it joins the managed fleet.
+SCHEDULER_MODE_TAG_KEY = os.getenv("SCHEDULER_MODE_TAG_KEY", "scheduler")
+
+# Optional: an instance ID that is always included even if its tag has not yet
+# propagated (the module's own workspace instance). Discovery is tag-based, so
+# this is only a belt-and-braces guarantee and may be empty.
 MANAGED_INSTANCE_ID = os.getenv("MANAGED_INSTANCE_ID", "")
+
 MANAGER_TAG_KEY = os.getenv("MANAGER_TAG_KEY", "CreatedBy")
 MANAGER_TAG_VALUE = os.getenv("MANAGER_TAG_VALUE", "workspace-scheduler")
-SCHEDULER_MODE_TAG_KEY = os.getenv("SCHEDULER_MODE_TAG_KEY", "scheduler")
 SCHEDULER_MODE_DEFAULT = os.getenv("SCHEDULER_MODE_DEFAULT", "free-time")
 SCHEDULER_MODE_ON_DEMAND = os.getenv("SCHEDULER_MODE_ON_DEMAND", "on-demand")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
@@ -35,6 +44,18 @@ SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "UTC")
 INSTANCE_ALLOWED_WINDOWS = os.getenv("INSTANCE_ALLOWED_WINDOWS", "[]")
 
 DAY_NAMES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+
+# Modes that keep the instance running continuously (never stopped on schedule).
+ON_DEMAND_ALIASES = {
+    "on-demand", "ondemand", "always-on", "always", "on", "keep-on", "keep-running",
+}
+# Modes that tell the scheduler to ignore the instance entirely: it will neither
+# start nor stop it. This is the safe escape hatch for "leave my box alone".
+DISABLED_ALIASES = {
+    "disabled", "off", "manual", "paused", "ignore", "none", "false", "no",
+}
+
+LIVE_INSTANCE_STATES = ["pending", "running", "stopping", "stopped"]
 
 
 def positive_int_env(name, default):
@@ -58,12 +79,12 @@ def lambda_handler(event, _context):
     logger.info("Lambda handler invoked", extra={"action": action})
 
     if action in ("start", "stop"):
-        result = manage_instance(action, event)
-        return {"status": "ok", "action": action, "instance_id": MANAGED_INSTANCE_ID, **result}
+        result = manage_instances(action, event)
+        return {"status": "ok", "action": action, **result}
 
     if action in ("enforce_schedule", "reconcile_schedule"):
         result = enforce_schedule()
-        return {"status": "ok", "action": action, "instance_id": MANAGED_INSTANCE_ID, **result}
+        return {"status": "ok", "action": action, **result}
 
     if action == "create_ami":
         backup_type = event.get("backup_type", "daily")
@@ -92,98 +113,153 @@ def lambda_handler(event, _context):
     raise ValueError(f"Unsupported action: {action}")
 
 
-def all_backup_instance_ids(only_running=False):
-    instance_states = ["running"] if only_running else ["pending", "running", "stopping", "stopped"]
-    instance = managed_instance_details()
-    return [MANAGED_INSTANCE_ID] if instance["State"]["Name"] in instance_states else []
+# ─── FLEET DISCOVERY ──────────────────────────────────────────────────────────
+def managed_instances(states=None):
+    """Return all instances tagged for scheduling, deduplicated.
+
+    Discovery is by tag KEY presence, so tagging any instance with
+    `<SCHEDULER_MODE_TAG_KEY>=<mode>` makes it part of the managed fleet.
+    """
+    wanted_states = states or LIVE_INSTANCE_STATES
+    filters = [
+        {"Name": "tag-key", "Values": [SCHEDULER_MODE_TAG_KEY]},
+        {"Name": "instance-state-name", "Values": wanted_states},
+    ]
+
+    instances = []
+    seen = set()
+    paginator = ec2.get_paginator("describe_instances")
+    for page in paginator.paginate(Filters=filters):
+        for reservation in page.get("Reservations", []):
+            for instance in reservation.get("Instances", []):
+                instance_id = instance["InstanceId"]
+                if instance_id not in seen:
+                    seen.add(instance_id)
+                    instances.append(instance)
+
+    # Belt-and-braces: always include the module's own instance if it exists and
+    # is in a relevant state but its tag has not been discovered (propagation lag).
+    if MANAGED_INSTANCE_ID and MANAGED_INSTANCE_ID not in seen:
+        instance = describe_instance(MANAGED_INSTANCE_ID)
+        if instance and instance["State"]["Name"] in wanted_states:
+            instances.append(instance)
+
+    return instances
 
 
-def managed_instance_details():
-    if not MANAGED_INSTANCE_ID:
-        raise ValueError("MANAGED_INSTANCE_ID is required")
+def describe_instance(instance_id):
+    try:
+        response = ec2.describe_instances(InstanceIds=[instance_id])
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "InvalidInstanceID.NotFound":
+            return None
+        raise
+    for reservation in response.get("Reservations", []):
+        for instance in reservation.get("Instances", []):
+            return instance
+    return None
 
-    response = ec2.describe_instances(InstanceIds=[MANAGED_INSTANCE_ID])
-    reservations = response.get("Reservations", [])
-    if not reservations or not reservations[0].get("Instances"):
-        raise ValueError(f"Managed instance not found: {MANAGED_INSTANCE_ID}")
 
-    return reservations[0]["Instances"][0]
+def instance_state(instance_id):
+    instance = describe_instance(instance_id)
+    if instance is None:
+        raise ValueError(f"Instance not found: {instance_id}")
+    return instance["State"]["Name"]
 
 
-def managed_instance_tags(instance=None):
-    instance = instance or managed_instance_details()
+def instance_tags(instance):
     return {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])}
 
 
-def scheduler_mode(instance=None):
-    tags = managed_instance_tags(instance)
-    return tags.get(SCHEDULER_MODE_TAG_KEY, SCHEDULER_MODE_DEFAULT).strip().lower()
+def normalize_mode(value):
+    mode = (value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    if not mode:
+        return SCHEDULER_MODE_DEFAULT
+    if mode in ON_DEMAND_ALIASES:
+        return SCHEDULER_MODE_ON_DEMAND
+    if mode in DISABLED_ALIASES:
+        return "disabled"
+    return mode
+
+
+def instance_mode(instance):
+    return normalize_mode(instance_tags(instance).get(SCHEDULER_MODE_TAG_KEY))
 
 
 def event_scheduler_mode(event):
     mode = (event or {}).get("scheduler_mode")
     if mode is None:
         return None
-    return str(mode).strip().lower()
+    return normalize_mode(mode)
 
 
-def is_on_demand(instance=None):
-    return scheduler_mode(instance) == SCHEDULER_MODE_ON_DEMAND
-
-
-def managed_instance_state():
-    return managed_instance_details()["State"]["Name"]
-
-
-def manage_instance(action, event=None):
-    instance = managed_instance_details()
-    state = instance["State"]["Name"]
-    current_mode = scheduler_mode(instance)
+# ─── START / STOP ─────────────────────────────────────────────────────────────
+def manage_instances(action, event=None):
     requested_mode = event_scheduler_mode(event)
+    results = [manage_one(instance, action, requested_mode) for instance in managed_instances()]
+    return {"count": len(results), "instances": results}
 
-    if is_on_demand(instance):
+
+def manage_one(instance, action, requested_mode):
+    instance_id = instance["InstanceId"]
+    state = instance["State"]["Name"]
+    mode = instance_mode(instance)
+
+    base = {"instance_id": instance_id, "scheduler_mode": mode}
+
+    if mode == "disabled":
+        return {**base, "previous_state": state, "result": "skipped_disabled"}
+
+    if mode == SCHEDULER_MODE_ON_DEMAND:
         if action == "start":
-            return {"scheduler_mode": current_mode, **start_managed_instance("on_demand_start", state)}
-        return {"previous_state": state, "scheduler_mode": current_mode, "result": "skipped_on_demand_stop"}
+            return {**base, **start_instance(instance_id, "on_demand_start", state)}
+        # on-demand instances are never stopped by the scheduler
+        return {**base, "previous_state": state, "result": "skipped_on_demand_stop"}
 
-    if requested_mode and requested_mode != current_mode:
+    # Scheduled (window) mode. A start/stop event may target a specific mode
+    # cohort; skip instances whose mode does not match that cohort.
+    if requested_mode and requested_mode != mode:
         return {
+            **base,
             "previous_state": state,
-            "scheduler_mode": current_mode,
             "event_scheduler_mode": requested_mode,
             "result": "skipped_mode_mismatch",
         }
 
     if action == "start":
-        return {"scheduler_mode": current_mode, **start_managed_instance("scheduled_start", state)}
-    elif action == "stop":
-        return {"scheduler_mode": current_mode, **stop_managed_instance("scheduled_stop", state)}
-    else:
-        raise ValueError(f"Unsupported instance action: {action}")
+        return {**base, **start_instance(instance_id, "scheduled_start", state)}
+    if action == "stop":
+        return {**base, **stop_instance(instance_id, "scheduled_stop", state)}
+    raise ValueError(f"Unsupported instance action: {action}")
 
 
-def start_managed_instance(reason, initial_state=None):
-    state = initial_state or managed_instance_state()
+def start_instance(instance_id, reason, initial_state=None):
+    state = initial_state or instance_state(instance_id)
     previous_state = state
 
     if state == "stopping":
         state = wait_for_instance_state(
+            instance_id,
             {"pending", "running", "stopped", "shutting-down", "terminated"},
             timeout_seconds=45,
             poll_seconds=5,
         )
 
     if state == "stopped":
-        ec2.start_instances(InstanceIds=[MANAGED_INSTANCE_ID])
-        result = "start_requested"
+        if DRY_RUN:
+            result = "dry_run_start"
+        else:
+            ec2.start_instances(InstanceIds=[instance_id])
+            result = "start_requested"
     elif state == "stopping":
         result = "stopping_start_deferred"
     else:
         result = "no_action"
 
     logger.info(
-        "Evaluated managed instance start",
+        "Evaluated instance start",
         extra={
+            "instance_id": instance_id,
             "reason": reason,
             "previous_state": previous_state,
             "evaluated_state": state,
@@ -199,28 +275,33 @@ def start_managed_instance(reason, initial_state=None):
     }
 
 
-def stop_managed_instance(reason, initial_state=None):
-    state = initial_state or managed_instance_state()
+def stop_instance(instance_id, reason, initial_state=None):
+    state = initial_state or instance_state(instance_id)
     previous_state = state
 
     if state == "pending":
         state = wait_for_instance_state(
+            instance_id,
             {"running", "stopping", "stopped", "shutting-down", "terminated"},
             timeout_seconds=45,
             poll_seconds=5,
         )
 
     if state == "running":
-        ec2.stop_instances(InstanceIds=[MANAGED_INSTANCE_ID])
-        result = "stop_requested"
+        if DRY_RUN:
+            result = "dry_run_stop"
+        else:
+            ec2.stop_instances(InstanceIds=[instance_id])
+            result = "stop_requested"
     elif state == "pending":
         result = "pending_stop_deferred"
     else:
         result = "no_action"
 
     logger.info(
-        "Evaluated managed instance stop",
+        "Evaluated instance stop",
         extra={
+            "instance_id": instance_id,
             "reason": reason,
             "previous_state": previous_state,
             "evaluated_state": state,
@@ -236,53 +317,64 @@ def stop_managed_instance(reason, initial_state=None):
     }
 
 
-def wait_for_instance_state(target_states, timeout_seconds=45, poll_seconds=5):
+def wait_for_instance_state(instance_id, target_states, timeout_seconds=45, poll_seconds=5):
     deadline = time.monotonic() + timeout_seconds
-    state = managed_instance_state()
+    state = instance_state(instance_id)
 
     while state not in target_states and time.monotonic() < deadline:
         time.sleep(poll_seconds)
-        state = managed_instance_state()
+        state = instance_state(instance_id)
 
     return state
 
 
+# ─── RECONCILE ────────────────────────────────────────────────────────────────
 def enforce_schedule():
     utc_now = datetime.now(timezone.utc)
-    instance = managed_instance_details()
-    current_mode = scheduler_mode(instance)
-    result = {
+    results = [enforce_one(instance, utc_now) for instance in managed_instances()]
+    return {
         "evaluated_at": utc_now.isoformat(),
-        "scheduler_mode": current_mode,
+        "count": len(results),
+        "instances": results,
     }
 
-    if is_on_demand(instance):
-        start_result = start_managed_instance("on_demand_reconcile", instance["State"]["Name"])
-        return {**result, **start_result}
+
+def enforce_one(instance, utc_now):
+    instance_id = instance["InstanceId"]
+    state = instance["State"]["Name"]
+    mode = instance_mode(instance)
+    base = {"instance_id": instance_id, "scheduler_mode": mode}
+
+    if mode == "disabled":
+        return {**base, "previous_state": state, "result": "skipped_disabled"}
+
+    if mode == SCHEDULER_MODE_ON_DEMAND:
+        return {**base, **start_instance(instance_id, "on_demand_reconcile", state)}
 
     try:
-        windows = active_allowed_windows(current_mode)
+        windows = active_allowed_windows(mode)
         allowed_now = is_allowed_time(utc_now, windows)
-        result.update({"allowed_now": allowed_now, "window_count": len(windows)})
     except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
-        logger.exception("Schedule evaluation failed; stopping instance as a safe default")
-        stop_result = stop_managed_instance("schedule_evaluation_failed")
+        # Non-destructive default: if we cannot evaluate the schedule we leave the
+        # instance untouched rather than stopping a possibly-in-use machine.
+        logger.exception(
+            "Schedule evaluation failed; leaving instance unchanged",
+            extra={"instance_id": instance_id, "scheduler_mode": mode},
+        )
         return {
-            **result,
-            "allowed_now": False,
-            "window_count": 0,
+            **base,
+            "previous_state": state,
+            "result": "schedule_error_no_action",
             "schedule_error": str(exc),
-            **stop_result,
         }
 
     if allowed_now:
-        start_result = start_managed_instance("scheduled_reconcile", instance["State"]["Name"])
-        return {**result, **start_result}
+        return {**base, "allowed_now": True, **start_instance(instance_id, "scheduled_reconcile", state)}
 
-    stop_result = stop_managed_instance("outside_allowed_window")
-    return {**result, **stop_result}
+    return {**base, "allowed_now": False, **stop_instance(instance_id, "outside_allowed_window", state)}
 
 
+# ─── SCHEDULE WINDOWS ─────────────────────────────────────────────────────────
 def allowed_windows():
     try:
         windows = json.loads(INSTANCE_ALLOWED_WINDOWS)
@@ -304,7 +396,7 @@ def active_allowed_windows(mode):
 
 
 def window_mode(window):
-    return str(window.get("mode", SCHEDULER_MODE_DEFAULT)).strip().lower()
+    return normalize_mode(window.get("mode", SCHEDULER_MODE_DEFAULT))
 
 
 def is_allowed_time(utc_now, windows):
@@ -382,13 +474,15 @@ def parse_hhmm(value):
     return hour * 60 + minute
 
 
+# ─── BACKUPS: AMIs ────────────────────────────────────────────────────────────
 def create_amis(backup_type):
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y%m%d-%H%M%S")
     created = []
 
     # Create backups only from running instances to avoid backups while powered off.
-    for instance_id in all_backup_instance_ids(only_running=True):
+    for instance in managed_instances(states=["running"]):
+        instance_id = instance["InstanceId"]
         image_name = f"{instance_id}-{backup_type}-{stamp}"
 
         response = ec2.create_image(
@@ -483,10 +577,11 @@ def cleanup_amis():
         },
     )
 
+    # Scope cleanup to artifacts this scheduler created (across every managed
+    # instance), never anything else in the account.
     filters = [
         {"Name": f"tag:{MANAGER_TAG_KEY}", "Values": [MANAGER_TAG_VALUE]},
     ]
-    filters.append({"Name": "tag:SourceInstanceId", "Values": [MANAGED_INSTANCE_ID]})
 
     images = ec2.describe_images(
         Owners=["self"],
@@ -585,16 +680,14 @@ def cleanup_amis():
     return {"cleaned": cleaned, "errors": errors}
 
 
+# ─── MAINTENANCE: PATCHING ────────────────────────────────────────────────────
 def run_security_update():
-    if not MANAGED_INSTANCE_ID:
-        raise ValueError("MANAGED_INSTANCE_ID is required")
-
-    state = managed_instance_state()
-    if state != "running":
-        return {"status": "skipped", "reason": f"Instance is {state}, not running"}
+    running = [instance["InstanceId"] for instance in managed_instances(states=["running"])]
+    if not running:
+        return {"status": "skipped", "reason": "no running managed instances"}
 
     response = ssm.send_command(
-        InstanceIds=[MANAGED_INSTANCE_ID],
+        InstanceIds=running,
         DocumentName="AWS-RunPatchBaseline",
         Parameters={"Operation": ["Install"], "RebootOption": ["NoReboot"]},
         TimeoutSeconds=600,
@@ -602,68 +695,68 @@ def run_security_update():
 
     command_id = response["Command"]["CommandId"]
 
-    result = {
-        "Status": "Pending",
-        "StandardOutputContent": "",
-        "StandardErrorContent": "",
-    }
-    # 24 iterations × 10 s = 240 s max; Lambda timeout is 360 s, leaving ~120 s headroom.
+    statuses = {instance_id: "Pending" for instance_id in running}
+    terminal = {"Success", "Failed", "TimedOut", "Cancelled"}
+    # 24 iterations × 10 s = 240 s max; Lambda timeout is 360 s, leaving headroom.
     for _ in range(24):
-        try:
-            result = ssm.get_command_invocation(CommandId=command_id, InstanceId=MANAGED_INSTANCE_ID)
-        except ClientError as exc:
-            error_code = exc.response.get("Error", {}).get("Code", "")
-            if error_code == "InvocationDoesNotExist":
-                time.sleep(10)
-                continue
-            raise
-        if result["Status"] in ("Success", "Failed", "TimedOut"):
+        pending = [iid for iid, status in statuses.items() if status not in terminal]
+        if not pending:
+            break
+        for instance_id in pending:
+            try:
+                invocation = ssm.get_command_invocation(
+                    CommandId=command_id, InstanceId=instance_id
+                )
+                statuses[instance_id] = invocation["Status"]
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "InvocationDoesNotExist":
+                    continue
+                raise
+        if all(status in terminal for status in statuses.values()):
             break
         time.sleep(10)
 
-    return {
-        "command_id": command_id,
-        "status": result["Status"],
-        "output": result.get("StandardOutputContent", ""),
-        "error_output": result.get("StandardErrorContent", ""),
-    }
+    return {"command_id": command_id, "statuses": statuses}
 
 
+# ─── BACKUPS: VOLUME SNAPSHOTS ────────────────────────────────────────────────
 def create_daily_snapshots():
     now = datetime.now(timezone.utc)
     created = []
 
-    instance = managed_instance_details()
-    instance_states = ["pending", "running", "stopping", "stopped"]
-    if instance["State"]["Name"] not in instance_states:
-        return created
+    for instance in managed_instances():
+        instance_id = instance["InstanceId"]
+        # Snapshot only the root volume: that is what the Lambda's IAM policy
+        # grants ec2:CreateSnapshot on. Snapshotting an extra data volume would
+        # fail with AccessDenied, so scope to the root device.
+        root_device_name = instance.get("RootDeviceName")
+        for mapping in instance.get("BlockDeviceMappings", []):
+            if root_device_name and mapping.get("DeviceName") != root_device_name:
+                continue
+            ebs = mapping.get("Ebs")
+            if not ebs:
+                continue
+            volume_id = ebs.get("VolumeId")
+            if not volume_id:
+                continue
 
-    instance_id = MANAGED_INSTANCE_ID
-    for mapping in instance.get("BlockDeviceMappings", []):
-        ebs = mapping.get("Ebs")
-        if not ebs:
-            continue
-        volume_id = ebs.get("VolumeId")
-        if not volume_id:
-            continue
-
-        snap = ec2.create_snapshot(
-            VolumeId=volume_id,
-            Description=f"Daily snapshot for {instance_id} volume {volume_id}",
-            TagSpecifications=[
-                {
-                    "ResourceType": "snapshot",
-                    "Tags": [
-                        {"Key": MANAGER_TAG_KEY, "Value": MANAGER_TAG_VALUE},
-                        {"Key": "BackupType", "Value": "daily-snapshot"},
-                        {"Key": "SourceInstanceId", "Value": instance_id},
-                        {"Key": "SourceVolumeId", "Value": volume_id},
-                        {"Key": "CreatedAtUtc", "Value": now.isoformat()},
-                    ],
-                }
-            ],
-        )
-        created.append(snap["SnapshotId"])
+            snap = ec2.create_snapshot(
+                VolumeId=volume_id,
+                Description=f"Daily snapshot for {instance_id} volume {volume_id}",
+                TagSpecifications=[
+                    {
+                        "ResourceType": "snapshot",
+                        "Tags": [
+                            {"Key": MANAGER_TAG_KEY, "Value": MANAGER_TAG_VALUE},
+                            {"Key": "BackupType", "Value": "daily-snapshot"},
+                            {"Key": "SourceInstanceId", "Value": instance_id},
+                            {"Key": "SourceVolumeId", "Value": volume_id},
+                            {"Key": "CreatedAtUtc", "Value": now.isoformat()},
+                        ],
+                    }
+                ],
+            )
+            created.append(snap["SnapshotId"])
 
     return created
 
@@ -674,7 +767,6 @@ def cleanup_daily_snapshots():
         {"Name": f"tag:{MANAGER_TAG_KEY}", "Values": [MANAGER_TAG_VALUE]},
         {"Name": "tag:BackupType", "Values": ["daily-snapshot"]},
     ]
-    filters.append({"Name": "tag:SourceInstanceId", "Values": [MANAGED_INSTANCE_ID]})
 
     snapshots = ec2.describe_snapshots(
         OwnerIds=["self"],

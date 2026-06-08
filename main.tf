@@ -19,9 +19,9 @@ module "ec2_instance" {
   root_volume_kms_key_id            = var.kms_key_arn
   root_volume_delete_on_termination = var.storage.delete_on_termination
   developer_config                  = var.developer_config
-  extra_env_vars                    = var.extra_env_vars
-  extra_env_var_parameter_names     = var.extra_env_var_parameter_names
+  env_vars                          = var.env_vars
   enable_session_manager            = var.enable_session_manager
+  scheduler_mode                    = var.scheduler_mode
   egress_ports                      = var.egress_ports
   ingress_ports                     = var.ingress_ports
   workspace_log_group_kms_key_id    = var.kms_key_arn
@@ -179,31 +179,47 @@ resource "aws_iam_role_policy" "lambda_ec2" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "ManageWorkspaceInstanceState"
+        # Start/stop is scoped to the managed fleet: any instance carrying the
+        # `scheduler` tag. This lets other instances opt in by tag while keeping
+        # the Lambda from touching untagged instances in the account.
+        Sid    = "ManageScheduledInstanceState"
         Effect = "Allow"
         Action = [
           "ec2:StartInstances",
           "ec2:StopInstances"
         ]
-        Resource = [
-          "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${module.ec2_instance.instance_id}"
-        ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Condition = {
+          Null = {
+            "aws:ResourceTag/scheduler" = "false"
+          }
+        }
       },
       {
-        Sid    = "CreateWorkspaceAmi"
+        Sid    = "CreateScheduledInstanceAmi"
         Effect = "Allow"
         Action = [
           "ec2:CreateImage"
         ]
-        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${module.ec2_instance.instance_id}"
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Condition = {
+          Null = {
+            "aws:ResourceTag/scheduler" = "false"
+          }
+        }
       },
       {
-        Sid    = "CreateManagedWorkspaceSnapshots"
+        Sid    = "CreateScheduledInstanceImageArtifacts"
         Effect = "Allow"
         Action = [
+          "ec2:CreateImage",
           "ec2:CreateSnapshot"
         ]
-        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:volume/${module.ec2_instance.root_volume_id}"
+        Resource = [
+          "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}::image/*",
+          "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}::snapshot/*",
+          "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:volume/*"
+        ]
       },
       {
         Sid    = "TagBackupArtifactsOnCreate"
@@ -225,6 +241,8 @@ resource "aws_iam_role_policy" "lambda_ec2" {
         }
       },
       {
+        # Deletion is scoped to artifacts this scheduler created (across every
+        # managed instance), never anything else in the account.
         Sid    = "DeleteManagedBackupArtifacts"
         Effect = "Allow"
         Action = [
@@ -237,8 +255,7 @@ resource "aws_iam_role_policy" "lambda_ec2" {
         ]
         Condition = {
           StringEquals = {
-            "ec2:ResourceTag/CreatedBy"        = "workspace-scheduler"
-            "ec2:ResourceTag/SourceInstanceId" = module.ec2_instance.instance_id
+            "ec2:ResourceTag/CreatedBy" = "workspace-scheduler"
           }
         }
       },
@@ -254,15 +271,25 @@ resource "aws_iam_role_policy" "lambda_ec2" {
         Resource = "*"
       },
       {
-        Sid    = "RunManagedPatchBaseline"
+        Sid    = "RunManagedPatchBaselineDocument"
         Effect = "Allow"
         Action = [
           "ssm:SendCommand"
         ]
-        Resource = [
-          "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}::document/AWS-RunPatchBaseline",
-          "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/${module.ec2_instance.instance_id}"
+        Resource = "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}::document/AWS-RunPatchBaseline"
+      },
+      {
+        Sid    = "RunManagedPatchBaselineInstances"
+        Effect = "Allow"
+        Action = [
+          "ssm:SendCommand"
         ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Condition = {
+          Null = {
+            "aws:ResourceTag/scheduler" = "false"
+          }
+        }
       }
     ]
   })
@@ -271,6 +298,11 @@ resource "aws_iam_role_policy" "lambda_ec2" {
 resource "aws_iam_role_policy_attachment" "lambda_logs" {
   role       = aws_iam_role.lambda_exec.name
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_xray" {
+  role       = aws_iam_role.lambda_exec.name
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
 }
 
 resource "aws_iam_role_policy" "lambda_dlq" {
@@ -336,6 +368,8 @@ resource "aws_iam_role_policy" "transfer_lambda_ec2" {
 }
 
 resource "aws_iam_role_policy" "transfer_lambda_copy" {
+  # checkov:skip=CKV_AWS_290:ec2:CopyImage cannot be scoped to the destination AMI, which does not exist until the copy runs.
+  # checkov:skip=CKV_AWS_355:ec2:CopyImage has no resource-level permissions, so "*" is required by the AWS API.
   count = var.ami_transfer.enable_copy ? 1 : 0
 
   name = "${var.name_prefix}-ami-transfer-lambda-copy"
@@ -357,6 +391,8 @@ resource "aws_iam_role_policy" "transfer_lambda_copy" {
 }
 
 resource "aws_iam_role_policy" "transfer_lambda_export" {
+  # checkov:skip=CKV_AWS_290:ec2:ExportImage cannot be scoped to the export task, which does not exist until the export runs; S3 writes are already scoped to the configured bucket/prefix.
+  # checkov:skip=CKV_AWS_355:ec2:ExportImage/DescribeExportImageTasks have no resource-level permissions, so "*" is required by the AWS API.
   count = var.ami_transfer.enable_export ? 1 : 0
 
   name = "${var.name_prefix}-ami-transfer-lambda-export"
@@ -415,6 +451,13 @@ resource "aws_iam_role_policy_attachment" "transfer_lambda_logs" {
 
   role       = aws_iam_role.transfer_lambda_exec[0].name
   policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "transfer_lambda_xray" {
+  count = local.ami_transfer_enabled ? 1 : 0
+
+  role       = aws_iam_role.transfer_lambda_exec[0].name
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AWSXRayDaemonWriteAccess"
 }
 
 resource "aws_iam_role_policy" "transfer_lambda_dlq" {
@@ -494,19 +537,28 @@ data "archive_file" "ami_transfer_zip" {
 
 
 resource "aws_lambda_function" "scheduler" {
+  # checkov:skip=CKV_AWS_117:Function calls only public AWS APIs (EC2/SSM); it has no VPC resources to reach, so VPC attachment adds NAT cost without benefit.
+  # checkov:skip=CKV_AWS_272:Code signing is unnecessary for this in-repo, archive-built function with a source_code_hash integrity check.
+  # checkov:skip=CKV_AWS_173:Environment variables contain no secrets (instance ID, tag keys, schedule JSON); a customer KMS key is used when kms_key_arn is set, otherwise the AWS-managed Lambda key encrypts them at rest.
   depends_on = [
     terraform_data.manual_export_preconditions,
     aws_iam_role_policy.lambda_dlq,
     aws_cloudwatch_log_group.scheduler
   ]
 
-  function_name    = local.scheduler_lambda_name
-  role             = aws_iam_role.lambda_exec.arn
-  runtime          = "python3.12"
-  handler          = "scheduler.lambda_handler"
-  filename         = data.archive_file.scheduler_zip.output_path
-  source_code_hash = data.archive_file.scheduler_zip.output_base64sha256
-  timeout          = 360
+  function_name                  = local.scheduler_lambda_name
+  role                           = aws_iam_role.lambda_exec.arn
+  runtime                        = "python3.12"
+  handler                        = "scheduler.lambda_handler"
+  filename                       = data.archive_file.scheduler_zip.output_path
+  source_code_hash               = data.archive_file.scheduler_zip.output_base64sha256
+  timeout                        = 360
+  reserved_concurrent_executions = 5
+  kms_key_arn                    = var.kms_key_arn
+
+  tracing_config {
+    mode = "Active"
+  }
 
   dead_letter_config {
     target_arn = aws_sqs_queue.lambda_dlq.arn
@@ -532,6 +584,9 @@ resource "aws_lambda_function" "scheduler" {
 }
 
 resource "aws_lambda_function" "ami_transfer" {
+  # checkov:skip=CKV_AWS_117:Function calls only public AWS APIs (EC2 copy/export); it has no VPC resources to reach, so VPC attachment adds NAT cost without benefit.
+  # checkov:skip=CKV_AWS_272:Code signing is unnecessary for this in-repo, archive-built function with a source_code_hash integrity check.
+  # checkov:skip=CKV_AWS_173:Environment variables contain no secrets (instance ID, tag keys, bucket/prefix names); a customer KMS key is used when kms_key_arn is set, otherwise the AWS-managed Lambda key encrypts them at rest.
   count = local.ami_transfer_enabled ? 1 : 0
 
   depends_on = [
@@ -541,13 +596,19 @@ resource "aws_lambda_function" "ami_transfer" {
     aws_cloudwatch_log_group.ami_transfer
   ]
 
-  function_name    = local.ami_transfer_lambda_name
-  role             = aws_iam_role.transfer_lambda_exec[0].arn
-  runtime          = "python3.12"
-  handler          = "ami_transfer.lambda_handler"
-  filename         = data.archive_file.ami_transfer_zip[0].output_path
-  source_code_hash = data.archive_file.ami_transfer_zip[0].output_base64sha256
-  timeout          = 300
+  function_name                  = local.ami_transfer_lambda_name
+  role                           = aws_iam_role.transfer_lambda_exec[0].arn
+  runtime                        = "python3.12"
+  handler                        = "ami_transfer.lambda_handler"
+  filename                       = data.archive_file.ami_transfer_zip[0].output_path
+  source_code_hash               = data.archive_file.ami_transfer_zip[0].output_base64sha256
+  timeout                        = 300
+  reserved_concurrent_executions = 5
+  kms_key_arn                    = var.kms_key_arn
+
+  tracing_config {
+    mode = "Active"
+  }
 
   dead_letter_config {
     target_arn = aws_sqs_queue.ami_transfer_dlq[0].arn
@@ -592,6 +653,9 @@ resource "aws_budgets_budget" "monthly_cost_alert" {
 # ================== S3 Resources ==================
 
 resource "aws_s3_bucket" "ami_export" {
+  # checkov:skip=CKV_AWS_18:Access logging would require a second log bucket; this is a private, encrypted, versioned staging bucket for short-lived AMI exports.
+  # checkov:skip=CKV_AWS_144:Cross-region replication is unwarranted for ephemeral, re-creatable export artifacts.
+  # checkov:skip=CKV2_AWS_62:Event notifications are not needed; exports are driven on demand by the AMI transfer Lambda.
   count  = local.manual_export_bucket_mode ? 1 : 0
   bucket = local.manual_export_bucket_name
 
@@ -657,6 +721,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "ami_export" {
 }
 
 resource "aws_cloudwatch_log_group" "scheduler" {
+  # checkov:skip=CKV_AWS_338:30-day retention is an intentional cost trade-off for an operational scheduler log; a year of retention is unnecessary.
   name              = local.scheduler_log_group_name
   retention_in_days = 30
   kms_key_id        = var.kms_key_arn
@@ -664,6 +729,7 @@ resource "aws_cloudwatch_log_group" "scheduler" {
 }
 
 resource "aws_cloudwatch_log_group" "ami_transfer" {
+  # checkov:skip=CKV_AWS_338:30-day retention is an intentional cost trade-off for an operational Lambda log; a year of retention is unnecessary.
   count = local.ami_transfer_enabled ? 1 : 0
 
   name              = local.ami_transfer_log_group_name
@@ -692,11 +758,13 @@ resource "aws_sqs_queue" "ami_transfer_dlq" {
 # ================== Schedulers ==================
 
 resource "aws_scheduler_schedule" "this" {
+  # checkov:skip=CKV_AWS_297:The schedule input is non-sensitive (an action name); a customer KMS key is used when kms_key_arn is set, otherwise the AWS-owned key encrypts it.
   for_each = local.scheduler_definitions
 
   name                         = "${var.name_prefix}-${each.key}"
   schedule_expression          = each.value.expression
   schedule_expression_timezone = each.value.timezone
+  kms_key_arn                  = var.kms_key_arn
 
   flexible_time_window {
     mode = "OFF"
