@@ -13,7 +13,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
   }
 }
@@ -23,7 +23,7 @@ provider "aws" {
 }
 
 module "workspace_ec2" {
-  source = "git::https://github.com/douklar/harbor.git//modules/ec2-instance?ref=v1.0.0"
+  source = "git::https://github.com/douklar/terraform-aws-agent-workspace.git//modules/ec2-instance?ref=v1.0.0"
 
   aws_region    = "eu-central-1"
   name_prefix   = "harbor"
@@ -71,26 +71,19 @@ If `iam_instance_profile_name` is supplied, the caller-managed profile must prov
 
 ## Runtime Secrets
 
-Use `extra_env_vars` when you want the module to create SSM SecureString placeholders for runtime tokens used by MCP servers, LLM CLIs, or other developer tools:
+Use `env_vars` to inject secrets into the instance. Each key is the environment variable name. Set the value to `null` to have the module create an SSM SecureString placeholder (populate the value in SSM after apply), or set it to an existing SSM parameter path to reference it directly without creating a new parameter:
 
 ```hcl
-extra_env_vars = [
-  "ANTHROPIC_API_KEY",
-  "OPENAI_API_KEY"
-]
+env_vars = {
+  ANTHROPIC_API_KEY = null                    # module creates placeholder — populate after apply
+  OPENAI_API_KEY    = null                    # module creates placeholder — populate after apply
+  API_KEY           = "/harbor/runtime/API_KEY" # reference an existing SSM parameter
+}
 ```
 
 For `name_prefix = "harbor"`, the module creates `/harbor/extra-environment-variables/ANTHROPIC_API_KEY` and `/harbor/extra-environment-variables/OPENAI_API_KEY` with placeholder values. Replace the placeholders in SSM after apply. Terraform ignores later value drift.
 
-Use `extra_env_var_parameter_names` when you already manage SSM SecureString parameters outside this module:
-
-```hcl
-extra_env_var_parameter_names = {
-  API_KEY = "/harbor/runtime/API_KEY"
-}
-```
-
-Terraform stores placeholder values for module-created parameters and stores only names for externally managed parameters. The instance profile receives `ssm:GetParameter` and `ssm:GetParameters` for those parameter ARNs when the module creates the profile. The generated `/etc/profile.d/extra-env-vars.sh` fetches values at shell startup and exports them into the shell environment.
+The instance profile receives `ssm:GetParameter` and `ssm:GetParameters` for all referenced parameter ARNs. The generated `/etc/profile.d/extra-env-vars.sh` fetches values at shell startup and exports them into the shell environment.
 
 ## Tailscale
 
@@ -111,19 +104,29 @@ When `developer_config.enable_tailscale = true`, the module creates a SecureStri
 | `aws_region` | required | Region used for bootstrap URLs and SSM parameter ARNs |
 | `name_prefix` | required | Lowercase resource name prefix |
 | `instance_name` | required | EC2 instance name |
-| `vpc_id` | `null` | VPC ID, `default`, or null for default VPC discovery |
-| `subnet_id` | `null` | Subnet ID, or null for first selected VPC subnet |
-| `security_group_ids` | `[]` | Existing security groups, or generated group when empty |
+| `instance_type` | `m7i-flex.large` | UEFI-capable x86_64 Nitro EC2 instance type |
+| `vpc_id` | `null` | VPC ID, `"default"`, or `null` for default VPC discovery |
+| `subnet_id` | `null` | Subnet ID, or `null` for first available VPC subnet |
+| `security_group_ids` | `[]` | Existing security groups; module creates one when empty |
 | `associate_public_ip` | `false` | Explicit public IPv4 association |
 | `ingress_ports` | `[]` | Generated ingress rules with explicit sources |
-| `egress_ports` | `443/tcp`, `80/tcp`, `41641/udp` | Generated egress rules |
-| `ami_id` | `null` | Optional pinned AMI ID |
+| `egress_ports` | `443/tcp, 80/tcp, 41641/udp` | Generated egress rules |
+| `ami_id` | `null` | Optional pinned AMI ID (`null` = latest Ubuntu 24.04 LTS) |
+| `root_volume_size` | `30` | Root EBS volume size in GB |
+| `root_volume_type` | `gp3` | Root EBS volume type (`gp2`, `gp3`, `io1`, `io2`, `standard`) |
+| `root_volume_encrypted` | `true` | Encrypt the root EBS volume |
+| `root_volume_kms_key_id` | `null` | KMS key ID or ARN for root EBS volume encryption |
 | `root_volume_delete_on_termination` | `false` | Whether EC2 deletes the root volume on termination |
-| `extra_env_vars` | `[]` | Environment variable names for module-created SSM SecureString placeholders |
-| `extra_env_var_parameter_names` | `{}` | Environment variable names mapped to existing SSM parameter names |
+| `iam_instance_profile_name` | `null` | Existing IAM instance profile name; module creates one when `null` |
+| `developer_config` | Claude Code + VS Code + Tailscale on; Codex CLI off | Tooling installed at bootstrap |
+| `env_vars` | `{}` | Map env var names to SSM parameter paths; `null` value creates a placeholder |
 | `enable_session_manager` | `true` | Enable Session Manager shell access |
+| `scheduler_mode` | `free-time` | Initial value of the `scheduler` tag; set at creation only (runtime overrides are preserved) |
+| `workspace_log_group_kms_key_id` | `null` | KMS key ARN for the CloudWatch log group |
+| `ssm_parameter_kms_key_id` | `null` | KMS key ID or ARN for module-created SecureString parameters |
+| `tags` | `{}` | Additional tags applied to all resources |
 
-See `variables.tf` for the complete schema.
+See `variables.tf` for the complete schema and validation rules.
 
 ## Outputs
 
@@ -132,13 +135,17 @@ See `variables.tf` for the complete schema.
 | `instance_id` | EC2 instance ID |
 | `instance_public_ip` | Public IP address when associated |
 | `instance_private_ip` | Private IP address |
-| `security_group_id` | Created security group ID, or null when existing groups are supplied |
+| `security_group_id` | Created security group ID, or `null` when existing groups are supplied |
 | `vpc_id` | VPC ID used by the instance |
 | `subnet_id` | Subnet ID used by the instance |
 | `ami_id` | AMI ID used by the instance |
-| `ami_boot_mode` | Resolved Ubuntu AMI boot mode, or null for custom AMIs |
+| `ami_boot_mode` | Resolved Ubuntu AMI boot mode, or `null` for custom AMIs |
 | `root_volume_id` | Root EBS volume ID |
-| `ssm_start_session_command` | Session Manager command, or null when disabled |
+| `ssm_start_session_command` | Session Manager command, or `null` when disabled |
+| `iam_instance_profile_name` | IAM instance profile name, or `null` when an existing profile is supplied |
+| `cloudwatch_log_group_name` | CloudWatch log group for bootstrap, cloud-init, and instance logs |
+| `ssm_parameter_tailscale_arn` | ARN of the Tailscale auth key SSM parameter (sensitive) |
+| `ssm_parameter_instance_name_arn` | ARN of the instance name SSM parameter |
 
 ## Example
 

@@ -101,6 +101,99 @@ module "workspace" {
 
 Timezone strings follow the [IANA tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — for example `Europe/Berlin`, `Europe/London`, `Asia/Tokyo`.
 
+#### Scheduling modes (the `scheduler` tag)
+
+Each instance's behaviour is driven by its `scheduler` **tag**, which the scheduler Lambda reads fresh on every run (every 15 minutes and at each window boundary). You can change it at runtime from the AWS console or CLI and it takes effect on the next reconcile — **Terraform will not revert your change.** Set the initial value with `var.scheduler_mode`.
+
+| Tag value | Behaviour |
+|:---|:---|
+| `free-time` (default) | Follows `instance_schedule_windows`: started inside a window, stopped outside it |
+| `on-demand` | **Always on** — the scheduler starts it if it is stopped and never stops it |
+| `disabled` | The scheduler ignores the instance entirely — it never starts or stops it |
+
+Values are matched leniently, so `on-demand`, `On-Demand`, `on_demand`, and `always-on` all mean the same thing (likewise `disabled`/`off`/`manual`/`paused`).
+
+To pin an instance on for a late-night session without editing Terraform:
+
+```bash
+aws ec2 create-tags --resources i-0123456789abcdef0 \
+  --tags Key=scheduler,Value=on-demand
+# ...later, hand it back to the schedule:
+aws ec2 create-tags --resources i-0123456789abcdef0 \
+  --tags Key=scheduler,Value=free-time
+```
+
+> If the scheduler ever cannot evaluate a schedule (bad window config, unknown timezone), it now **leaves the instance running** instead of stopping it, so a misconfiguration never powers off a machine you are using.
+
+#### Managing other instances with the same scheduler
+
+The scheduler is fleet-aware: it manages **any EC2 instance in the region that carries a `scheduler` tag**, not just the one this module creates. To bring another instance under the same schedule, just tag it:
+
+```bash
+aws ec2 create-tags --resources i-0aaaa1111bbbb2222 \
+  --tags Key=scheduler,Value=free-time
+```
+
+That instance is then started/stopped on the same `instance_schedule_windows`, respects `on-demand`/`disabled`, and (if the corresponding `scheduler_features` are enabled) is included in automated backups and patching. The Lambda's IAM permissions are scoped by the `scheduler` tag, so it can only act on instances that have opted in.
+
+#### Custom schedules (multiple cohorts)
+
+Each schedule window belongs to a **cohort** named by its `mode`. The `scheduler` tag value selects which cohort an instance follows, so you can run different instances on completely different schedules from a single deployment. The default cohort is `free-time`; define windows with other modes to add cohorts. Mode can be any lowercase identifier except the reserved words `on-demand` and `disabled`.
+
+```hcl
+module "workspace" {
+  source  = "douklar/agent-workspace/aws"
+  version = "~> 1.0"
+
+  instance_schedule_windows = [
+    # Cohort "free-time": weekday evenings + weekends (the default).
+    {
+      name       = "evenings"
+      mode       = "free-time"
+      timezone   = "Europe/Berlin"
+      days       = ["MON", "TUE", "WED", "THU", "FRI"]
+      start_time = "18:30"
+      stop_time  = "23:00"
+    },
+    {
+      name       = "weekends"
+      mode       = "free-time"
+      timezone   = "Europe/Berlin"
+      days       = ["SAT", "SUN"]
+      start_time = "11:00"
+      stop_time  = "22:00"
+    },
+    # Cohort "office-hours": Mon–Fri 09:00–18:00 for a shared/CI box.
+    {
+      name       = "weekday_office"
+      mode       = "office-hours"
+      timezone   = "Europe/Berlin"
+      days       = ["MON", "TUE", "WED", "THU", "FRI"]
+      start_time = "09:00"
+      stop_time  = "18:00"
+    }
+  ]
+
+  # The module's own instance follows "free-time" by default. Override with:
+  # scheduler_mode = "office-hours"
+}
+```
+
+Tag any instance to move it between cohorts at runtime (effective on the next reconcile, within ~15 minutes):
+
+```bash
+aws ec2 create-tags --resources i-0123456789abcdef0 \
+  --tags Key=scheduler,Value=office-hours
+```
+
+**Rules and tips for building windows:**
+
+- **Combine windows freely.** An instance is *on* if **any** window of its cohort currently matches; otherwise it is stopped. Several windows in the same cohort are unioned.
+- **Per-window timezone.** Each window has its own IANA `timezone`, so one cohort can mix regions (e.g. a `MON–FRI` window in `Europe/Berlin` and another in `America/New_York`).
+- **`start_time` must be earlier than `stop_time`** within a window. To run **across midnight**, split it into two windows in the same cohort — for example `22:00–23:59` and `00:00–06:00`.
+- **Run all day** on given days with `00:00`–`23:59`.
+- **Unknown/empty cohort = safe.** If an instance's tag names a cohort with no matching windows, the scheduler leaves the instance running rather than guessing.
+
 ### Instance size
 
 ```hcl
@@ -117,18 +210,22 @@ Supported families: `t3`, `t3a`, `m5`, `m6i`, `m7i`, `m7i-flex`, `c5`, `c6i`, `c
 
 ### API keys and secrets
 
-The module creates encrypted SSM Parameter Store placeholders. Terraform never reads or stores the secret values — you populate them after apply.
+Use `env_vars` to inject secrets into the instance. Each key is the environment variable name. Set the value to `null` to have the module create an SSM placeholder (you fill it in after apply), or set it to an existing SSM parameter path to reference it directly.
 
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
   version = "~> 1.0"
 
-  extra_env_vars = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"]
+  env_vars = {
+    ANTHROPIC_API_KEY = null               # module creates placeholder — populate after apply
+    GITHUB_TOKEN      = null               # module creates placeholder — populate after apply
+    SHARED_SECRET     = "/team/shared-key" # reference an existing SSM parameter
+  }
 }
 ```
 
-After `terraform apply`, write each value:
+After `terraform apply`, write placeholder values:
 
 ```bash
 aws ssm put-parameter \
@@ -326,9 +423,9 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 | `ami_id` | `null` | AMI override (`null` = latest Ubuntu 24.04 LTS) |
 | `developer_config` | Claude Code + VS Code + Tailscale enabled; Codex CLI disabled | Tooling installed at boot |
 | `instance_schedule_windows` | Evenings + weekends, Berlin | Start/stop schedule windows |
+| `scheduler_mode` | `free-time` | Initial mode: `free-time` follows the schedule, `on-demand` keeps the instance always on |
 | `scheduler_features` | reconcile only | Backup, patch, and cleanup jobs |
-| `extra_env_vars` | `[]` | Create SSM placeholders for environment variables |
-| `extra_env_var_parameter_names` | `{}` | Map env var names to existing SSM parameters |
+| `env_vars` | `{}` | Map env var names to SSM parameter paths; `null` value creates a placeholder |
 | `kms_key_arn` | `null` | Customer-managed KMS key ARN |
 | `cost_report` | disabled | AWS Budgets cost alert |
 | `ami_transfer` | disabled | AMI copy or export configuration |
@@ -347,16 +444,29 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 | `instance_id` | EC2 instance ID |
 | `instance_public_ip` | Public IP address (if `associate_public_ip = true`) |
 | `ami_id` | AMI used to launch the instance |
+| `ami_boot_mode` | Boot mode of the resolved Ubuntu AMI (`null` for custom AMIs) |
 | `root_volume_id` | Root EBS volume ID |
 | `ssm_start_session_command` | Ready-to-run `aws ssm start-session` command |
 | `workspace_log_group_name` | CloudWatch log group for bootstrap and instance logs |
 | `scheduler_lambda_name` | Name of the EventBridge scheduler Lambda |
 | `scheduler_lambda_arn` | ARN of the EventBridge scheduler Lambda |
+| `scheduler_lambda_role_arn` | IAM execution role ARN for the scheduler Lambda |
+| `scheduler_invoke_role_arn` | IAM role ARN used by EventBridge Scheduler to invoke Lambda |
 | `scheduler_names` | All EventBridge Scheduler schedule names created |
-| `ami_transfer_lambda_name` | AMI transfer Lambda name (null if transfer disabled) |
-| `manual_export_latest_ami_example` | Example `aws lambda invoke` command to export the latest AMI (null if export disabled) |
-| `ami_export_bucket_name` | S3 bucket used for AMI exports (null if export disabled) |
+| `scheduler_arns` | Map of schedule name to EventBridge Scheduler ARN |
+| `scheduler_log_group_name` | CloudWatch log group name for the scheduler Lambda |
 | `scheduler_dlq_arn` | ARN of the scheduler Lambda dead-letter queue |
+| `ami_transfer_lambda_name` | AMI transfer Lambda name (`null` if transfer disabled) |
+| `ami_transfer_lambda_arn` | AMI transfer Lambda ARN (`null` if transfer disabled) |
+| `ami_transfer_lambda_role_arn` | IAM execution role ARN for the AMI transfer Lambda (`null` if transfer disabled) |
+| `ami_transfer_log_group_name` | CloudWatch log group name for the AMI transfer Lambda (`null` if transfer disabled) |
+| `ami_transfer_dlq_arn` | ARN of the AMI transfer Lambda dead-letter queue (`null` if transfer disabled) |
+| `ami_transfer_copy_enabled` | Whether manual AMI copy is enabled |
+| `ami_transfer_export_enabled` | Whether manual AMI export is enabled |
+| `ami_export_bucket_name` | S3 bucket used for AMI exports (`null` if export disabled) |
+| `manual_export_latest_ami_example` | Example `aws lambda invoke` command to export the latest AMI (`null` if export disabled) |
+| `manual_copy_latest_ami_permission_command` | Command to grant EventBridge permission to invoke the AMI copy Lambda (`null` if copy disabled) |
+| `cost_report` | Full cost report configuration object |
 | `cost_report_enabled` | Whether the AWS Budgets alert is active |
 
 ---
@@ -376,7 +486,7 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 ## After apply checklist
 
 1. If `developer_config.enable_tailscale = true` — write the Tailscale auth key to SSM
-2. If `extra_env_vars` is configured — write each secret value to SSM
+2. If `env_vars` has `null` entries — write each secret value to SSM
 3. Connect: run `terraform output -raw ssm_start_session_command` and execute the result
 4. The instance starts automatically at the next scheduled window
 

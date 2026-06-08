@@ -127,12 +127,17 @@ def export_latest_ami(s3_bucket, s3_prefix, disk_format):
     image = latest_managed_ami()
     image_id = image["ImageId"]
 
+    # ExportImage writes the artifact to "<S3Prefix><task-id>.<format>". The prefix
+    # must end with "/" so the object lands inside the folder (e.g. ami-exports/),
+    # matching the IAM policy and S3 lifecycle rule scoped to that prefix.
+    s3_prefix_key = s3_prefix.rstrip("/") + "/"
+
     response = ec2.export_image(
         DiskImageFormat=disk_format,
         ImageId=image_id,
         S3ExportLocation={
             "S3Bucket": s3_bucket,
-            "S3Prefix": s3_prefix,
+            "S3Prefix": s3_prefix_key,
         },
         Description=f"Manual export for {image_id}",
         RoleName=VMIMPORT_ROLE_NAME,
@@ -151,6 +156,6 @@ def export_latest_ami(s3_bucket, s3_prefix, disk_format):
         "source_image_id": image_id,
         "export_image_task_id": response["ExportImageTaskId"],
         "s3_bucket": s3_bucket,
-        "s3_prefix": s3_prefix,
+        "s3_prefix": s3_prefix_key,
         "disk_format": disk_format,
     }

@@ -218,38 +218,22 @@ variable "developer_config" {
   default = {}
 }
 
-variable "extra_env_vars" {
-  description = "Uppercase environment variable names for which the module creates SSM SecureString placeholder parameters. Put real values in SSM after apply."
-  type        = set(string)
-  default     = []
-
-  validation {
-    condition     = alltrue([for name in var.extra_env_vars : can(regex("^[A-Z_][A-Z0-9_]*$", name))])
-    error_message = "extra_env_vars entries must be uppercase shell environment variable names, for example API_KEY."
-  }
-
-  validation {
-    condition     = length(setintersection(var.extra_env_vars, toset(keys(var.extra_env_var_parameter_names)))) == 0
-    error_message = "Do not set the same environment variable in both extra_env_vars and extra_env_var_parameter_names."
-  }
-}
-
-variable "extra_env_var_parameter_names" {
-  description = "Map of uppercase environment variable names to existing SSM Parameter Store SecureString names. Terraform reads parameter names only, not secret values."
+variable "env_vars" {
+  description = "Map of uppercase environment variable names to SSM SecureString parameter paths. Set a key's value to null to have the module create a placeholder SSM parameter (populate the value in SSM after apply). Set a key's value to an existing SSM parameter path to reference it directly without creating a new parameter."
   type        = map(string)
   default     = {}
 
   validation {
-    condition     = alltrue([for name in keys(var.extra_env_var_parameter_names) : can(regex("^[A-Z_][A-Z0-9_]*$", name))])
-    error_message = "extra_env_var_parameter_names keys must be uppercase shell environment variable names, for example API_KEY."
+    condition     = alltrue([for name in keys(var.env_vars) : can(regex("^[A-Z_][A-Z0-9_]*$", name))])
+    error_message = "env_vars keys must be uppercase shell environment variable names, for example API_KEY."
   }
 
   validation {
     condition = alltrue([
-      for parameter_name in values(var.extra_env_var_parameter_names) :
-      can(regex("^/?[A-Za-z0-9_./-]+$", parameter_name)) && !strcontains(parameter_name, "//") && !strcontains(parameter_name, "..")
+      for parameter_name in values(var.env_vars) :
+      parameter_name == null || (can(regex("^/?[A-Za-z0-9_./-]+$", parameter_name)) && !strcontains(parameter_name, "//") && !strcontains(parameter_name, ".."))
     ])
-    error_message = "extra_env_var_parameter_names values must be valid SSM parameter names without empty path segments or '..'."
+    error_message = "env_vars values must be null or valid SSM parameter paths without empty path segments or '..'."
   }
 }
 
@@ -257,6 +241,17 @@ variable "enable_session_manager" {
   description = "Enable AWS Systems Manager Session Manager for instance access"
   type        = bool
   default     = true
+}
+
+variable "scheduler_mode" {
+  description = "Initial value for the instance's `scheduler` tag, which drives the scheduler Lambda. Use \"free-time\" to follow the configured schedule windows, or \"on-demand\" to keep the instance always on. This sets the value only at creation; change the `scheduler` tag at runtime (console, CLI, or Lambda) to override, and Terraform will not revert it."
+  type        = string
+  default     = "free-time"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]*$", var.scheduler_mode))
+    error_message = "scheduler_mode must be a lowercase identifier such as free-time or on-demand."
+  }
 }
 
 variable "tags" {

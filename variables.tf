@@ -184,7 +184,7 @@ variable "ami_id" {
 }
 
 variable "instance_schedule_windows" {
-  description = "Allowed instance run windows. Times use 24-hour HH:MM format in each window timezone, for example 18:30. Mode must match the EC2 scheduler tag when using scheduled mode."
+  description = "Allowed instance run windows. Times use 24-hour HH:MM format in each window timezone, for example 18:30. Each window belongs to a scheduling cohort named by its `mode`; an instance follows a cohort by setting its `scheduler` tag to that mode (default cohort: free-time). Define windows with different modes to run different instances on different schedules."
   type = list(object({
     name       = string
     mode       = optional(string, "free-time")
@@ -228,8 +228,16 @@ variable "instance_schedule_windows" {
   }
 
   validation {
-    condition     = alltrue([for window in var.instance_schedule_windows : contains(["free-time", "office-hours"], lower(window.mode))])
-    error_message = "Each instance_schedule_windows mode must be free-time or office-hours."
+    # mode names a scheduling cohort. Tag an instance with scheduler=<mode> to
+    # make it follow the windows of that mode. Any lowercase identifier is a
+    # valid custom cohort (e.g. free-time, office-hours, night-shift), except the
+    # reserved modes on-demand (always on) and disabled (scheduler ignores it).
+    condition = alltrue([
+      for window in var.instance_schedule_windows :
+      can(regex("^[a-z][a-z0-9-]*$", lower(window.mode))) &&
+      !contains(["on-demand", "ondemand", "always-on", "always", "on", "disabled", "off", "manual", "paused", "ignore", "none"], lower(window.mode))
+    ])
+    error_message = "Each instance_schedule_windows mode must be a lowercase identifier such as free-time, office-hours, or night-shift, and must not be a reserved mode (on-demand or disabled)."
   }
 
   validation {
@@ -292,38 +300,22 @@ variable "developer_config" {
   default = {}
 }
 
-variable "extra_env_vars" {
-  description = "Uppercase environment variable names for which the module creates SSM SecureString placeholder parameters. Put real values in SSM after apply."
-  type        = set(string)
-  default     = []
-
-  validation {
-    condition     = alltrue([for name in var.extra_env_vars : can(regex("^[A-Z_][A-Z0-9_]*$", name))])
-    error_message = "extra_env_vars entries must be uppercase shell environment variable names, for example API_KEY."
-  }
-
-  validation {
-    condition     = length(setintersection(var.extra_env_vars, toset(keys(var.extra_env_var_parameter_names)))) == 0
-    error_message = "Do not set the same environment variable in both extra_env_vars and extra_env_var_parameter_names."
-  }
-}
-
-variable "extra_env_var_parameter_names" {
-  description = "Map of uppercase environment variable names to existing SSM Parameter Store SecureString names. Terraform reads parameter names only, not secret values."
+variable "env_vars" {
+  description = "Map of uppercase environment variable names to SSM SecureString parameter paths. Set a key's value to null to have the module create a placeholder SSM parameter (populate the value in SSM after apply). Set a key's value to an existing SSM parameter path to reference it directly without creating a new parameter."
   type        = map(string)
   default     = {}
 
   validation {
-    condition     = alltrue([for name in keys(var.extra_env_var_parameter_names) : can(regex("^[A-Z_][A-Z0-9_]*$", name))])
-    error_message = "extra_env_var_parameter_names keys must be uppercase shell environment variable names, for example API_KEY."
+    condition     = alltrue([for name in keys(var.env_vars) : can(regex("^[A-Z_][A-Z0-9_]*$", name))])
+    error_message = "env_vars keys must be uppercase shell environment variable names, for example API_KEY."
   }
 
   validation {
     condition = alltrue([
-      for parameter_name in values(var.extra_env_var_parameter_names) :
-      can(regex("^/?[A-Za-z0-9_./-]+$", parameter_name)) && !strcontains(parameter_name, "//") && !strcontains(parameter_name, "..")
+      for parameter_name in values(var.env_vars) :
+      parameter_name == null || (can(regex("^/?[A-Za-z0-9_./-]+$", parameter_name)) && !strcontains(parameter_name, "//") && !strcontains(parameter_name, ".."))
     ])
-    error_message = "extra_env_var_parameter_names values must be valid SSM parameter names without empty path segments or '..'."
+    error_message = "env_vars values must be null or valid SSM parameter paths without empty path segments or '..'."
   }
 }
 
@@ -331,6 +323,17 @@ variable "enable_session_manager" {
   description = "Enable AWS Systems Manager Session Manager for instance access."
   type        = bool
   default     = true
+}
+
+variable "scheduler_mode" {
+  description = "Initial scheduling mode for the instance. Use \"free-time\" to follow instance_schedule_windows (the instance is started/stopped on schedule), or \"on-demand\" to keep it always on. This sets the instance's `scheduler` tag at creation only; change that tag at runtime (console, CLI, or the scheduler Lambda) to override, and Terraform will not revert it."
+  type        = string
+  default     = "free-time"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]*$", var.scheduler_mode))
+    error_message = "scheduler_mode must be a lowercase identifier such as free-time or on-demand."
+  }
 }
 
 variable "ami_transfer" {
@@ -382,15 +385,15 @@ variable "ami_transfer" {
 variable "scheduler_features" {
   description = "Optional automated jobs that run on a schedule. All default to off — enable only what you need. daily_snapshot_retention_days and monthly_ami_retention_days control how long backups are kept."
   type = object({
-    reconcile                    = optional(bool, true)
-    daily_snapshots              = optional(bool, false)
-    weekly_amis                  = optional(bool, false)
-    monthly_amis                 = optional(bool, false)
-    backup_cleanup               = optional(bool, false)
-    security_update              = optional(bool, false)
-    maintenance_timezone         = optional(string, "Europe/Berlin")
+    reconcile                     = optional(bool, true)
+    daily_snapshots               = optional(bool, false)
+    weekly_amis                   = optional(bool, false)
+    monthly_amis                  = optional(bool, false)
+    backup_cleanup                = optional(bool, false)
+    security_update               = optional(bool, false)
+    maintenance_timezone          = optional(string, "Europe/Berlin")
     daily_snapshot_retention_days = optional(number, 7)
-    monthly_ami_retention_days   = optional(number, 30)
+    monthly_ami_retention_days    = optional(number, 30)
   })
   default = {}
 
@@ -411,8 +414,8 @@ variable "kms_key_arn" {
   default     = null
 
   validation {
-    condition     = var.kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[a-f0-9-]+$", var.kms_key_arn))
-    error_message = "kms_key_arn must be a valid KMS key ARN, for example arn:aws:kms:eu-central-1:123456789012:key/mrk-abc123."
+    condition     = var.kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/(mrk-)?[a-f0-9-]+$", var.kms_key_arn))
+    error_message = "kms_key_arn must be a valid KMS key ARN, for example arn:aws:kms:eu-central-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab or a multi-region key arn:aws:kms:eu-central-1:123456789012:key/mrk-1234abcd1234abcd."
   }
 }
 

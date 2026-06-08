@@ -37,10 +37,13 @@ locals {
   # ── RESOLVED NETWORK IDS ───────────────────────────────────────────────
   selected_vpc_id = local.use_default_vpc ? data.aws_vpc.default_with_fallback[0].id : var.vpc_id
 
+  # sort() makes the auto-selected subnet deterministic — aws_subnets does not
+  # guarantee ordering, so without this the "first" subnet (and its AZ) could
+  # change between applies and force instance replacement.
+  discovered_subnet_ids = local.use_default_vpc ? data.aws_subnets.default_in_vpc[0].ids : data.aws_subnets.selected_in_vpc[0].ids
+
   selected_subnet_id = var.subnet_id != null ? var.subnet_id : (
-    local.use_default_vpc
-    ? data.aws_subnets.default_in_vpc[0].ids[0]
-    : data.aws_subnets.selected_in_vpc[0].ids[0]
+    length(local.discovered_subnet_ids) > 0 ? sort(local.discovered_subnet_ids)[0] : null
   )
 
   selected_security_group_ids = length(var.security_group_ids) > 0 ? var.security_group_ids : [
@@ -56,8 +59,8 @@ locals {
   # ── INSTANCE PROFILE / SSM ─────────────────────────────────────────────
   session_manager_enabled       = var.enable_session_manager
   cloudwatch_logs_enabled       = true
-  module_managed_extra_env_vars = var.extra_env_vars
-  parameter_access_enabled      = var.developer_config.enable_tailscale || length(local.module_managed_extra_env_vars) > 0 || length(keys(var.extra_env_var_parameter_names)) > 0
+  module_managed_extra_env_vars = toset([for k, v in var.env_vars : k if v == null])
+  parameter_access_enabled      = var.developer_config.enable_tailscale || length(var.env_vars) > 0
   instance_profile_enabled      = local.session_manager_enabled || local.cloudwatch_logs_enabled || local.parameter_access_enabled
   create_iam_profile            = var.iam_instance_profile_name == null && local.instance_profile_enabled
 
@@ -99,7 +102,7 @@ locals {
 
   extra_env_var_ssm_params = merge(
     { for name, parameter in aws_ssm_parameter.extra_env_vars : name => parameter.name },
-    var.extra_env_var_parameter_names
+    { for k, v in var.env_vars : k => v if v != null }
   )
   extra_env_var_ssm_arns = [
     for parameter_name in values(local.extra_env_var_ssm_params) :
@@ -109,6 +112,7 @@ locals {
 
 # ─── CLOUDWATCH LOGS ──────────────────────────────────────────────────────────
 resource "aws_cloudwatch_log_group" "workspace" {
+  # checkov:skip=CKV_AWS_338:7-day retention is an intentional cost trade-off for bootstrap/instance logs; a year of retention is unnecessary.
   name              = local.cloudwatch_log_group_name
   retention_in_days = 7
   kms_key_id        = var.workspace_log_group_kms_key_id
@@ -119,7 +123,15 @@ resource "aws_cloudwatch_log_group" "workspace" {
 }
 
 # ─── SECURITY GROUP ───────────────────────────────────────────────────────────
+# Unrestricted egress (0.0.0.0/0) is required: the instance must reach the public
+# internet during bootstrap and operation — apt/OS repositories, AWS service
+# endpoints (SSM, CloudWatch), Tailscale coordination, and npm/package registries
+# — and those targets do not map to a small, stable CIDR set. Egress is still
+# limited to the specific ports in var.egress_ports. Ingress is not opened by
+# default (var.ingress_ports defaults to []).
+#trivy:ignore:AVD-AWS-0104
 resource "aws_security_group" "workspace" {
+  # checkov:skip=CKV2_AWS_5:Attached to the workspace instance via vpc_security_group_ids; Checkov cannot trace the link through count/locals.
   count       = length(var.security_group_ids) == 0 ? 1 : 0
   name        = "${var.name_prefix}-workspace-sg"
   description = "Security group for workspace instances"
@@ -211,6 +223,7 @@ resource "aws_ssm_parameter" "extra_env_vars" {
 }
 
 resource "aws_ssm_parameter" "instance_name" {
+  # checkov:skip=CKV2_AWS_34:Holds a non-sensitive instance name; SecureString would add KMS cost and block plaintext reads by the bootstrap/SSM agent.
   name        = "/${var.name_prefix}/instance-name"
   description = "Instance name for workspace"
   type        = "String"
@@ -223,6 +236,7 @@ resource "aws_ssm_parameter" "instance_name" {
 }
 
 resource "aws_ssm_parameter" "cw_agent_config" {
+  # checkov:skip=CKV2_AWS_34:Holds a non-sensitive CloudWatch agent config; the SSM agent reads it as plaintext via the AmazonCloudWatch-ManageAgent association.
   name        = local.cw_agent_config_param_name
   description = "CloudWatch Agent log collection config for the workspace instance."
   type        = "String"
@@ -443,6 +457,8 @@ data "aws_ami" "ubuntu_2404_lts" {
 
 # ─── EC2 INSTANCE ─────────────────────────────────────────────────────────────
 resource "aws_instance" "workspace" {
+  # checkov:skip=CKV_AWS_88:A public IP is opt-in via associate_public_ip (default false); the basic example enables it because the default VPC has no NAT gateway.
+  # checkov:skip=CKV_AWS_126:Detailed monitoring is an intentional cost trade-off; basic 5-minute monitoring is sufficient for a personal workspace.
   depends_on = [
     aws_iam_role_policy_attachment.ssm_managed_core,
     aws_iam_role_policy.ssm_parameters,
@@ -455,9 +471,21 @@ resource "aws_instance" "workspace" {
   vpc_security_group_ids      = local.selected_security_group_ids
   associate_public_ip_address = var.associate_public_ip
   iam_instance_profile        = local.iam_profile_name
+  ebs_optimized               = true
   user_data_replace_on_change = false
   metadata_options {
-    http_tokens = "required"
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+    # Hop limit 2 lets containers running on the instance (e.g. dockerized
+    # coding agents) reach IMDSv2 for the instance role credentials.
+    http_put_response_hop_limit = 2
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.subnet_id != null || length(local.discovered_subnet_ids) > 0
+      error_message = "No subnets were found in the selected VPC. Set subnet_id explicitly, or choose a VPC that has at least one subnet."
+    }
   }
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
     aws_region                = var.aws_region
@@ -490,5 +518,13 @@ resource "aws_instance" "workspace" {
 resource "aws_ec2_tag" "scheduler_mode" {
   resource_id = aws_instance.workspace.id
   key         = "scheduler"
-  value       = "free-time"
+  value       = var.scheduler_mode
+
+  # The scheduler tag is a runtime switch: operators (or the scheduler Lambda)
+  # flip it to "on-demand" to keep the instance on outside its windows. Ignore
+  # value drift so Terraform sets it once at creation and never reverts a
+  # deliberate runtime override.
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
