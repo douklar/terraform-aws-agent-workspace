@@ -553,7 +553,7 @@ resource "aws_lambda_function" "scheduler" {
   filename                       = data.archive_file.scheduler_zip.output_path
   source_code_hash               = data.archive_file.scheduler_zip.output_base64sha256
   timeout                        = 360
-  reserved_concurrent_executions = 5
+  reserved_concurrent_executions = null
   kms_key_arn                    = var.kms_key_arn
 
   tracing_config {
@@ -603,7 +603,7 @@ resource "aws_lambda_function" "ami_transfer" {
   filename                       = data.archive_file.ami_transfer_zip[0].output_path
   source_code_hash               = data.archive_file.ami_transfer_zip[0].output_base64sha256
   timeout                        = 300
-  reserved_concurrent_executions = 5
+  reserved_concurrent_executions = null
   kms_key_arn                    = var.kms_key_arn
 
   tracing_config {
