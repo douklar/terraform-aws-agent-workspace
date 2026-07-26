@@ -540,6 +540,7 @@ resource "aws_lambda_function" "scheduler" {
   # checkov:skip=CKV_AWS_117:Function calls only public AWS APIs (EC2/SSM); it has no VPC resources to reach, so VPC attachment adds NAT cost without benefit.
   # checkov:skip=CKV_AWS_272:Code signing is unnecessary for this in-repo, archive-built function with a source_code_hash integrity check.
   # checkov:skip=CKV_AWS_173:Environment variables contain no secrets (instance ID, tag keys, schedule JSON); a customer KMS key is used when kms_key_arn is set, otherwise the AWS-managed Lambda key encrypts them at rest.
+  # checkov:skip=CKV_AWS_115:Concurrency intentionally left unmanaged; this function is invoked on a single schedule for one instance and never runs concurrently. A fixed reservation previously broke apply on accounts with low unreserved-concurrency quota.
   depends_on = [
     terraform_data.manual_export_preconditions,
     aws_iam_role_policy.lambda_dlq,
@@ -587,6 +588,7 @@ resource "aws_lambda_function" "ami_transfer" {
   # checkov:skip=CKV_AWS_117:Function calls only public AWS APIs (EC2 copy/export); it has no VPC resources to reach, so VPC attachment adds NAT cost without benefit.
   # checkov:skip=CKV_AWS_272:Code signing is unnecessary for this in-repo, archive-built function with a source_code_hash integrity check.
   # checkov:skip=CKV_AWS_173:Environment variables contain no secrets (instance ID, tag keys, bucket/prefix names); a customer KMS key is used when kms_key_arn is set, otherwise the AWS-managed Lambda key encrypts them at rest.
+  # checkov:skip=CKV_AWS_115:Concurrency intentionally left unmanaged; this function is invoked on a single schedule for one instance and never runs concurrently. A fixed reservation previously broke apply on accounts with low unreserved-concurrency quota.
   count = local.ami_transfer_enabled ? 1 : 0
 
   depends_on = [
