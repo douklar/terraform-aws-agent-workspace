@@ -21,8 +21,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
+          # Not the merge ref: the merge commit this job tags must be reachable.
+          ref: main
           fetch-depth: 0
 
       - name: Calculate next semantic version
@@ -66,51 +68,24 @@ jobs:
             exit 1
           fi
 
-          # Detect pre-release label from PR title or body.
-          # Supported markers: [alpha], [beta], [rc], [pre-release] (defaults to beta).
-          # Examples:
-          #   feat: add new scheduler [beta]
-          #   fix: patch thing [rc]
-          is_prerelease="false"
-          pre_label="beta"
-          combined="${pr_title}"$'\n'"${pr_body}"
-          if grep -Eqi '\[alpha\]' <<< "${combined}"; then
-            is_prerelease="true"; pre_label="alpha"
-          elif grep -Eqi '\[beta\]' <<< "${combined}"; then
-            is_prerelease="true"; pre_label="beta"
-          elif grep -Eqi '\[rc\]' <<< "${combined}"; then
-            is_prerelease="true"; pre_label="rc"
-          elif grep -Eqi '\[pre-release\]' <<< "${combined}"; then
-            is_prerelease="true"; pre_label="beta"
-          fi
-
-          # Use only stable tags (no pre-release suffix) to calculate the next version.
+          # Stable tags only, so v3.0.0-alpha.7 still releases as v3.0.0.
           latest_tag="$(git tag -l --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)"
 
           if [[ -z "${latest_tag}" ]]; then
-            next_base="v1.0.0"
+            next_tag="v1.0.0"
           else
             version="${latest_tag#v}"
             IFS='.' read -r major minor patch <<< "${version}"
 
             case "${bump_type}" in
-              major) next_base="v$((major + 1)).0.0" ;;
-              minor) next_base="v${major}.$((minor + 1)).0" ;;
-              patch) next_base="v${major}.${minor}.$((patch + 1))" ;;
+              major) next_tag="v$((major + 1)).0.0" ;;
+              minor) next_tag="v${major}.$((minor + 1)).0" ;;
+              patch) next_tag="v${major}.${minor}.$((patch + 1))" ;;
             esac
-          fi
-
-          if [[ "${is_prerelease}" == "true" ]]; then
-            # Count existing pre-release tags for this base+label and increment.
-            existing="$(git tag -l | grep -cE "^${next_base}-${pre_label}\.[0-9]+$" || true)"
-            next_tag="${next_base}-${pre_label}.$((existing + 1))"
-          else
-            next_tag="${next_base}"
           fi
 
           echo "tag_name=${next_tag}" >> "${GITHUB_OUTPUT}"
           echo "bump_type=${bump_type}" >> "${GITHUB_OUTPUT}"
-          echo "is_prerelease=${is_prerelease}" >> "${GITHUB_OUTPUT}"
           echo "merge_sha=${merge_sha}" >> "${GITHUB_OUTPUT}"
 
       - name: Create and push tag
@@ -119,6 +94,8 @@ jobs:
           set -euo pipefail
 
           tag_name="${{ steps.version.outputs.tag_name }}"
+          # This PR's merge commit, not current main: a second merge landing
+          # mid-run must not ship under this version.
           target_sha="${{ steps.version.outputs.merge_sha }}"
 
           if [[ -z "${target_sha}" ]]; then
@@ -140,4 +117,3 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag_name }}
           generate_release_notes: true
-          prerelease: ${{ steps.version.outputs.is_prerelease == 'true' }}

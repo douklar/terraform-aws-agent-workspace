@@ -152,10 +152,9 @@ variable "ingress_ports" {
 }
 
 variable "storage" {
-  description = "Workspace disk settings. The defaults work for most users — the only thing you may want to change is size_gb if you need more disk space."
+  description = "Workspace disk settings. Most users only ever change size_gb. Encryption is controlled by var.encryption, not here."
   type = object({
     size_gb               = optional(number, 30)
-    encrypted             = optional(bool, true)
     delete_on_termination = optional(bool, false)
   })
   default = {}
@@ -184,7 +183,7 @@ variable "ami_id" {
 }
 
 variable "instance_schedule_windows" {
-  description = "Allowed instance run windows. Times use 24-hour HH:MM format in each window timezone, for example 18:30. Each window belongs to a scheduling cohort named by its `mode`; an instance follows a cohort by setting its `scheduler` tag to that mode (default cohort: free-time). Define windows with different modes to run different instances on different schedules."
+  description = "Allowed instance run windows. Times use 24-hour HH:MM format in each window timezone, for example 18:30. A window may cross midnight (e.g. start_time 22:00, stop_time 02:00); an equal start_time/stop_time means the window is active all day. Each window belongs to a scheduling cohort named by its `mode`; an instance follows a cohort by setting its `scheduler` tag to that mode (default cohort: free-time). Define windows with different modes to run different instances on different schedules."
   type = list(object({
     name       = string
     mode       = optional(string, "free-time")
@@ -232,12 +231,20 @@ variable "instance_schedule_windows" {
     # make it follow the windows of that mode. Any lowercase identifier is a
     # valid custom cohort (e.g. free-time, office-hours, night-shift), except the
     # reserved modes on-demand (always on) and disabled (scheduler ignores it).
+    #
+    # Must match ON_DEMAND_ALIASES / DISABLED_ALIASES in lambda/scheduler.py.
     condition = alltrue([
       for window in var.instance_schedule_windows :
       can(regex("^[a-z][a-z0-9-]*$", lower(window.mode))) &&
-      !contains(["on-demand", "ondemand", "always-on", "always", "on", "disabled", "off", "manual", "paused", "ignore", "none"], lower(window.mode))
+      !contains(
+        [
+          "on-demand", "ondemand", "always-on", "always", "on", "keep-on", "keep-running",
+          "disabled", "off", "manual", "paused", "ignore", "none", "false", "no",
+        ],
+        lower(window.mode)
+      )
     ])
-    error_message = "Each instance_schedule_windows mode must be a lowercase identifier such as free-time, office-hours, or night-shift, and must not be a reserved mode (on-demand or disabled)."
+    error_message = "Each instance_schedule_windows mode must be a lowercase identifier such as free-time, office-hours, or night-shift, and must not be a reserved mode. Reserved (always-on): on-demand, ondemand, always-on, always, on, keep-on, keep-running. Reserved (ignored by the scheduler): disabled, off, manual, paused, ignore, none, false, no."
   }
 
   validation {
@@ -252,19 +259,6 @@ variable "instance_schedule_windows" {
       length(regexall("^([01][0-9]|2[0-3]):[0-5][0-9]$", window.stop_time)) > 0
     ])
     error_message = "Each instance_schedule_windows start_time and stop_time must use 24-hour HH:MM format, for example 18:30."
-  }
-
-  validation {
-    condition = alltrue([
-      for window in var.instance_schedule_windows : (
-        length(regexall("^([01][0-9]|2[0-3]):[0-5][0-9]$", window.start_time)) == 0 ||
-        length(regexall("^([01][0-9]|2[0-3]):[0-5][0-9]$", window.stop_time)) == 0
-        ) ? true : (
-        tonumber(split(":", window.start_time)[0]) * 60 + tonumber(split(":", window.start_time)[1]) <
-        tonumber(split(":", window.stop_time)[0]) * 60 + tonumber(split(":", window.stop_time)[1])
-      )
-    ])
-    error_message = "Each instance_schedule_windows start_time must be earlier than stop_time. Use separate windows for schedules that cross midnight."
   }
 
   validation {
@@ -337,17 +331,18 @@ variable "scheduler_mode" {
 }
 
 variable "ami_transfer" {
-  description = "Settings for manually copying or exporting the latest workspace AMI (disk image). Both actions are off by default. Enable copy to duplicate the AMI within or across AWS regions. Enable export to download it as a VMDK/VHD/RAW file to an S3 bucket."
+  description = "Settings for manually copying or exporting the latest workspace AMI (disk image). Both actions are off by default. Enable copy to duplicate the AMI within or across AWS regions. Enable export to download it as a VMDK/VHD/RAW file to an S3 bucket. export_bucket_force_destroy controls whether `terraform destroy` (or disabling export) deletes a module-created export bucket that still holds objects: false (default) makes Terraform refuse to delete a non-empty export bucket, so you never lose exports you meant to keep; set it to true if you want a clean teardown regardless of bucket contents (for example a disposable/CI workspace). Only applies when create_export_bucket is true."
   type = object({
-    enable_copy           = optional(bool, false)
-    copy_target_region    = optional(string, "")
-    enable_export         = optional(bool, false)
-    export_s3_bucket      = optional(string, "")
-    create_export_bucket  = optional(bool, true)
-    export_s3_prefix      = optional(string, "ami-exports")
-    export_disk_format    = optional(string, "VMDK")
-    export_retention_days = optional(number, 30)
-    export_role_name      = optional(string, "vmimport")
+    enable_copy                 = optional(bool, false)
+    copy_target_region          = optional(string, "")
+    enable_export               = optional(bool, false)
+    export_s3_bucket            = optional(string, "")
+    create_export_bucket        = optional(bool, true)
+    export_bucket_force_destroy = optional(bool, false)
+    export_s3_prefix            = optional(string, "ami-exports")
+    export_disk_format          = optional(string, "VMDK")
+    export_retention_days       = optional(number, 30)
+    export_role_name            = optional(string, "vmimport")
   })
   default = {}
 
@@ -383,7 +378,7 @@ variable "ami_transfer" {
 }
 
 variable "scheduler_features" {
-  description = "Optional automated jobs that run on a schedule. All default to off — enable only what you need. daily_snapshot_retention_days and monthly_ami_retention_days control how long backups are kept."
+  description = "Optional automated jobs that run on a schedule. All default to off. Each backup kind has its own retention: daily_snapshot_retention_days (7) for daily EBS snapshots, weekly_ami_retention_days (30) for weekly AMIs, and monthly_ami_retention_days (30) for monthly AMIs. Retention only takes effect when backup_cleanup is enabled; without it nothing is ever deleted."
   type = object({
     reconcile                     = optional(bool, true)
     daily_snapshots               = optional(bool, false)
@@ -393,6 +388,7 @@ variable "scheduler_features" {
     security_update               = optional(bool, false)
     maintenance_timezone          = optional(string, "Europe/Berlin")
     daily_snapshot_retention_days = optional(number, 7)
+    weekly_ami_retention_days     = optional(number, 30)
     monthly_ami_retention_days    = optional(number, 30)
   })
   default = {}
@@ -403,19 +399,49 @@ variable "scheduler_features" {
   }
 
   validation {
+    condition     = var.scheduler_features.weekly_ami_retention_days >= 1
+    error_message = "scheduler_features.weekly_ami_retention_days must be at least 1."
+  }
+
+  validation {
     condition     = var.scheduler_features.monthly_ami_retention_days >= 1
     error_message = "scheduler_features.monthly_ami_retention_days must be at least 1."
   }
 }
 
-variable "kms_key_arn" {
-  description = "Optional KMS key ARN to encrypt all module-managed resources (EBS volume, SSM parameters, SQS queues, S3 export bucket, CloudWatch logs). Leave null to use AWS-managed default encryption — everything still works without it."
-  type        = string
-  default     = null
+variable "encryption" {
+  description = <<-EOT
+    How to encrypt the resources this module manages.
+
+      aws-managed      (default) AWS-owned/managed keys everywhere. No extra cost.
+      customer-managed One KMS key for everything. Set kms_key_arn to reuse an
+                       existing key, or leave it null and the module creates one.
+      unencrypted      Turns encryption off where AWS allows it: the EBS root
+                       volume and the SQS dead-letter queues.
+
+    Everywhere else AWS encrypts unconditionally (S3, CloudWatch Logs, Lambda,
+    EventBridge Scheduler) or the data is secret by design (SSM SecureString).
+    Those stay on their AWS-managed default rather than a customer key.
+  EOT
+  type = object({
+    type        = optional(string, "aws-managed")
+    kms_key_arn = optional(string, null)
+  })
+  default = {}
 
   validation {
-    condition     = var.kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/(mrk-)?[a-f0-9-]+$", var.kms_key_arn))
-    error_message = "kms_key_arn must be a valid KMS key ARN, for example arn:aws:kms:eu-central-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab or a multi-region key arn:aws:kms:eu-central-1:123456789012:key/mrk-1234abcd1234abcd."
+    condition     = contains(["unencrypted", "aws-managed", "customer-managed"], var.encryption.type)
+    error_message = "encryption.type must be one of: unencrypted, aws-managed, customer-managed."
+  }
+
+  validation {
+    condition     = var.encryption.kms_key_arn == null || var.encryption.type == "customer-managed"
+    error_message = "encryption.kms_key_arn can only be set when encryption.type is customer-managed."
+  }
+
+  validation {
+    condition     = var.encryption.kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/(mrk-)?[a-f0-9-]+$", var.encryption.kms_key_arn))
+    error_message = "encryption.kms_key_arn must be null or a valid KMS key ARN, for example arn:aws:kms:eu-central-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab or a multi-region key arn:aws:kms:eu-central-1:123456789012:key/mrk-1234abcd1234abcd."
   }
 }
 

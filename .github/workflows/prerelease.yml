@@ -1,0 +1,61 @@
+name: Pre-release from dev
+
+# Publishes a pre-release from dev without touching main. Terraform version
+# constraints skip pre-releases unless one is requested exactly.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Pre-release tag, e.g. v3.0.0-alpha.2 (must contain a - suffix)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prerelease
+  cancel-in-progress: false
+
+jobs:
+  prerelease:
+    name: Tag dev as a pre-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v7
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Tag and release
+        shell: bash
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # A stable tag here would release from dev, bypassing main.
+          if [[ ! "${TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]]; then
+            echo "Not a pre-release semver tag: ${TAG_NAME}" >&2
+            echo "Expected something like v3.0.0-alpha.2. Stable releases are cut by merging dev into main." >&2
+            exit 1
+          fi
+
+          if git rev-parse --verify --quiet "refs/tags/${TAG_NAME}" >/dev/null; then
+            echo "Tag already exists: ${TAG_NAME}" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG_NAME}"
+          git push origin "${TAG_NAME}"
+
+      - name: Create GitHub pre-release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag }}
+          generate_release_notes: true
+          prerelease: true

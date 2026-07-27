@@ -261,7 +261,7 @@ variable "tags" {
 }
 
 variable "workspace_log_group_kms_key_id" {
-  description = "Optional KMS key ARN for the EC2 workspace CloudWatch log group"
+  description = "Optional KMS key ID or ARN for the EC2 workspace CloudWatch log group"
   type        = string
   default     = null
 }

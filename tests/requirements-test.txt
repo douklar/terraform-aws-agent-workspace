@@ -1,0 +1,9 @@
+# Test-only dependencies for the Lambda unit tests (tests/).
+# boto3 is imported by the handler modules at collection time; pytest runs them.
+boto3>=1.34,<2
+pytest>=8,<10
+# Parses .github/workflows/*.yml so the release/prune workflows are asserted
+# rather than assumed to be well-formed.
+PyYAML>=6,<7
+# Lint gate for the handlers and tests; settings live in ruff.toml.
+ruff>=0.14,<1

@@ -7,13 +7,13 @@
 <p align="center">
   <a href="https://registry.terraform.io/modules/douklar/agent-workspace/aws"><img src="https://img.shields.io/badge/Terraform%20Registry-douklar%2Fagent--workspace-7B42BC?style=flat-square&logo=terraform&logoColor=white" alt="Terraform Registry" /></a>
   <img src="https://img.shields.io/badge/Terraform-%3E%3D1.9-7B42BC?style=flat-square&logo=terraform&logoColor=white" alt="Terraform >= 1.9" />
-  <img src="https://img.shields.io/badge/AWS%20Provider-~%3E%206.47-FF9900?style=flat-square&logo=amazonaws&logoColor=white" alt="AWS Provider ~> 6.47" />
+  <img src="https://img.shields.io/badge/AWS%20Provider-%3E%3D6.47-FF9900?style=flat-square&logo=amazonaws&logoColor=white" alt="AWS Provider >= 6.47" />
   <img src="https://img.shields.io/badge/Ubuntu-24.04%20LTS-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS" />
   <img src="https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square" alt="Apache 2.0" />
 </p>
 
 <p align="center">
-  A Terraform module that provisions a personal AI agent workspace on AWS — an Ubuntu 24.04 EC2 instance with Claude Code, VS Code Server, and Tailscale pre-installed, accessed securely through AWS Session Manager with no open ports.
+  A Terraform module that provisions a personal AI agent workspace on AWS: an Ubuntu 24.04 EC2 instance with Claude Code, VS Code Server, and Tailscale pre-installed, accessed securely through AWS Session Manager with no open ports.
 </p>
 
 <p align="center">
@@ -28,12 +28,12 @@ This module is designed for developers who want a ready-to-use cloud workstation
 
 | Capability | Detail |
 |:---|:---|
-| **Zero-exposure access** | AWS Session Manager and Tailscale — no SSH keys, no inbound ports required |
+| **Zero-exposure access** | AWS Session Manager and Tailscale. No SSH keys, no inbound ports required |
 | **Cost-optimized scheduling** | Automatic start/stop on your schedule, reducing EC2 costs by ~70% |
 | **Pre-installed tooling** | Claude Code, VS Code Server, Tailscale; optional OpenAI Codex CLI |
-| **Secrets management** | API keys stored in AWS SSM Parameter Store — Terraform never sees the values |
+| **Secrets management** | API keys stored in AWS SSM Parameter Store, so Terraform never sees the values |
 | **Automated backups** | Daily EBS snapshots, weekly and monthly AMIs with configurable retention |
-| **Encryption by default** | EBS, SSM parameters, SQS, and S3 are all encrypted without a custom KMS key |
+| **Configurable encryption** | Unencrypted, AWS-managed, or a single customer-managed KMS key. Your choice, applied everywhere |
 | **Budget protection** | Native AWS Budgets alert at a cost threshold you define |
 
 ---
@@ -43,7 +43,7 @@ This module is designed for developers who want a ready-to-use cloud workstation
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   aws_region = "eu-central-1"
 }
@@ -76,7 +76,7 @@ The instance starts and stops automatically according to configurable time windo
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   aws_region = "eu-central-1"
 
@@ -99,17 +99,17 @@ module "workspace" {
 }
 ```
 
-Timezone strings follow the [IANA tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — for example `Europe/Berlin`, `Europe/London`, `Asia/Tokyo`.
+Timezone strings follow the [IANA tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones), for example `Europe/Berlin`, `Europe/London`, `Asia/Tokyo`.
 
 #### Scheduling modes (the `scheduler` tag)
 
-Each instance's behaviour is driven by its `scheduler` **tag**, which the scheduler Lambda reads fresh on every run (every 15 minutes and at each window boundary). You can change it at runtime from the AWS console or CLI and it takes effect on the next reconcile — **Terraform will not revert your change.** Set the initial value with `var.scheduler_mode`.
+Each instance's behaviour is driven by its `scheduler` **tag**, which the scheduler Lambda reads fresh on every run (every 15 minutes and at each window boundary). You can change it at runtime from the AWS console or CLI and it takes effect on the next reconcile. **Terraform will not revert your change.** Set the initial value with `var.scheduler_mode`.
 
 | Tag value | Behaviour |
 |:---|:---|
 | `free-time` (default) | Follows `instance_schedule_windows`: started inside a window, stopped outside it |
-| `on-demand` | **Always on** — the scheduler starts it if it is stopped and never stops it |
-| `disabled` | The scheduler ignores the instance entirely — it never starts or stops it |
+| `on-demand` | **Always on**. The scheduler starts it if it is stopped and never stops it |
+| `disabled` | The scheduler ignores the instance entirely. It never starts or stops it |
 
 Values are matched leniently, so `on-demand`, `On-Demand`, `on_demand`, and `always-on` all mean the same thing (likewise `disabled`/`off`/`manual`/`paused`).
 
@@ -138,12 +138,12 @@ That instance is then started/stopped on the same `instance_schedule_windows`, r
 
 #### Custom schedules (multiple cohorts)
 
-Each schedule window belongs to a **cohort** named by its `mode`. The `scheduler` tag value selects which cohort an instance follows, so you can run different instances on completely different schedules from a single deployment. The default cohort is `free-time`; define windows with other modes to add cohorts. Mode can be any lowercase identifier except the reserved words `on-demand` and `disabled`.
+Each schedule window belongs to a **cohort** named by its `mode`. The `scheduler` tag value selects which cohort an instance follows, so you can run different instances on completely different schedules from a single deployment. The default cohort is `free-time`; define windows with other modes to add cohorts. Mode can be any lowercase identifier that is not a reserved word. Reserved for "always on": `on-demand`, `ondemand`, `always-on`, `always`, `on`, `keep-on`, `keep-running`. Reserved for "scheduler ignores this instance": `disabled`, `off`, `manual`, `paused`, `ignore`, `none`, `false`, `no`. The scheduler treats every alias as its canonical mode, so naming a cohort after one is rejected at plan time.
 
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   instance_schedule_windows = [
     # Cohort "free-time": weekday evenings + weekends (the default).
@@ -163,7 +163,7 @@ module "workspace" {
       start_time = "11:00"
       stop_time  = "22:00"
     },
-    # Cohort "office-hours": Mon–Fri 09:00–18:00 for a shared/CI box.
+    # Cohort "office-hours": Mon-Fri 09:00-18:00 for a shared/CI box.
     {
       name       = "weekday_office"
       mode       = "office-hours"
@@ -189,17 +189,18 @@ aws ec2 create-tags --resources i-0123456789abcdef0 \
 **Rules and tips for building windows:**
 
 - **Combine windows freely.** An instance is *on* if **any** window of its cohort currently matches; otherwise it is stopped. Several windows in the same cohort are unioned.
-- **Per-window timezone.** Each window has its own IANA `timezone`, so one cohort can mix regions (e.g. a `MON–FRI` window in `Europe/Berlin` and another in `America/New_York`).
-- **`start_time` must be earlier than `stop_time`** within a window. To run **across midnight**, split it into two windows in the same cohort — for example `22:00–23:59` and `00:00–06:00`.
-- **Run all day** on given days with `00:00`–`23:59`.
-- **Unknown/empty cohort = safe.** If an instance's tag names a cohort with no matching windows, the scheduler leaves the instance running rather than guessing.
+- **Overlapping windows need `reconcile`.** The union above is computed by the reconcile job. The discrete stop cron of one window fires regardless of whether a *sibling* window in the same cohort still allows that time, so with two overlapping windows the instance is stopped at the earlier `stop_time` and restarted by the next reconcile (within ~15 minutes). With `reconcile = false` it simply stays stopped. Either enable reconcile (the default) or keep windows in a cohort non-overlapping.
+- **Per-window timezone.** Each window has its own IANA `timezone`, so one cohort can mix regions (e.g. a `MON-FRI` window in `Europe/Berlin` and another in `America/New_York`).
+- **A window may cross midnight.** Set `start_time` later than `stop_time` (for example `start_time = "22:00"`, `stop_time = "02:00"`) and the scheduler keeps the instance on from 22:00 through 02:00 the next day.
+- **Run all day** on given days by setting `start_time` equal to `stop_time` (e.g. `00:00`-`00:00`).
+- **Unknown cohorts are rejected at plan time.** `scheduler_mode` must be a reserved mode or a cohort some window actually defines, so a typo fails `terraform plan` instead of producing an instance the scheduler quietly never manages. If you retag an instance at runtime to a cohort that has no windows, the scheduler leaves it running rather than guessing.
 
 ### Instance size
 
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   instance_type = "m7i-flex.xlarge"  # 4 vCPU, 16 GB RAM
   storage       = { size_gb = 100 }  # default: 30 GB
@@ -215,11 +216,11 @@ Use `env_vars` to inject secrets into the instance. Each key is the environment 
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   env_vars = {
-    ANTHROPIC_API_KEY = null               # module creates placeholder — populate after apply
-    GITHUB_TOKEN      = null               # module creates placeholder — populate after apply
+    ANTHROPIC_API_KEY = null               # module creates placeholder, fill in after apply
+    GITHUB_TOKEN      = null               # module creates placeholder, fill in after apply
     SHARED_SECRET     = "/team/shared-key" # reference an existing SSM parameter
   }
 }
@@ -245,7 +246,7 @@ All tools except Codex CLI are enabled by default. Override to control what gets
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   developer_config = {
     install_vscode      = true   # VS Code Server
@@ -273,7 +274,7 @@ Reboot or restart the Tailscale service on the instance to activate. The instanc
 
 #### Tailscale access control policy
 
-Apply this ACL in your [Tailscale admin console](https://login.tailscale.com/admin/acls) to restrict access to the workspace. Only Tailscale admins can reach it on port 22 or open a Tailscale SSH session — no other users or devices can connect. Advanced users can customize the policy further — for example adding more tags, user groups, or port rules — directly in the Tailscale console.
+Apply this ACL in your [Tailscale admin console](https://login.tailscale.com/admin/acls) to restrict access to the workspace. Only Tailscale admins can reach it on port 22 or open a Tailscale SSH session. No other users or devices can connect. Advanced users can customize the policy further (more tags, user groups, or port rules) directly in the Tailscale console.
 
 ```json
 {
@@ -300,14 +301,14 @@ Apply this ACL in your [Tailscale admin console](https://login.tailscale.com/adm
 }
 ```
 
-To apply this tag to the workspace device, generate a **pre-authenticated, tagged auth key** in the Tailscale admin console (`Settings → Keys → Generate auth key`) and enable the `tag:ssh-enabled` tag on it. Then write that key to SSM instead of a plain auth key — the device will inherit the tag automatically on join.
+To apply this tag to the workspace device, generate a **pre-authenticated, tagged auth key** in the Tailscale admin console (`Settings → Keys → Generate auth key`) and enable the `tag:ssh-enabled` tag on it. Then write that key to SSM instead of a plain auth key, and the device will inherit the tag automatically on join.
 
 ### Automated backups
 
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   scheduler_features = {
     daily_snapshots               = true            # nightly EBS snapshot
@@ -316,6 +317,7 @@ module "workspace" {
     backup_cleanup                = true            # auto-expire old backups
     security_update               = true            # weekly security patches
     daily_snapshot_retention_days = 7
+    weekly_ami_retention_days     = 30
     monthly_ami_retention_days    = 30
     maintenance_timezone          = "Europe/Berlin"
   }
@@ -334,14 +336,18 @@ module "workspace" {
 | `security_update` | `false` | Apply security patches on a weekly schedule |
 | `maintenance_timezone` | `Europe/Berlin` | Timezone for all maintenance jobs |
 | `daily_snapshot_retention_days` | `7` | Days to retain daily EBS snapshots |
+| `weekly_ami_retention_days` | `30` | Days to retain weekly AMIs |
 | `monthly_ami_retention_days` | `30` | Days to retain monthly AMIs |
+
+Retention values only do anything when `backup_cleanup = true`. Leave it off and
+backups accumulate forever, which is the usual cause of a surprise EBS bill.
 
 ### Budget alert
 
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   cost_report = {
     enabled                  = true
@@ -352,26 +358,87 @@ module "workspace" {
 }
 ```
 
-### Customer-managed KMS key
+Each threshold sends **two** alerts: one when AWS *forecasts* you will cross it
+this month, and one when you *actually* do. The forecast arrives first and is
+the one you can still act on. The budget covers the whole account, not just this
+module's resources. Scoping it to a tag would need a cost-allocation tag
+activated in Billing, and until that activation completes the filter matches $0
+and the alert silently never fires.
 
-All resources use AWS-managed keys by default. To use your own KMS key across all resources:
+The budget tracks **total spend in the AWS account**, not just this workspace's resources. This module is built for a personal or dedicated account, and an account-wide budget can never under-report. Both an actual and a forecasted alert are sent at the threshold.
+
+### Encryption
+
+One `encryption` variable controls every KMS-aware resource this module manages: the EBS root volume, SSM parameters, SQS queues, the S3 export bucket, CloudWatch log groups, Lambda environment variables, and EventBridge schedule payloads. Three modes:
 
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
-  kms_key_arn = "arn:aws:kms:eu-central-1:123456789012:key/mrk-abc123"
+  # Default if you set nothing: AWS-managed keys everywhere, no cost, no setup.
+  encryption = {
+    type = "aws-managed"
+  }
 }
 ```
 
-This applies to: EBS volume, SSM parameters, SQS queues, S3 export bucket, and CloudWatch Logs.
+```hcl
+  # Customer-managed: the module creates one KMS key and uses it everywhere.
+  encryption = {
+    type = "customer-managed"
+  }
+```
+
+```hcl
+  # Customer-managed with a key you already own, instead of a new one.
+  encryption = {
+    type        = "customer-managed"
+    kms_key_arn = "arn:aws:kms:eu-central-1:123456789012:key/mrk-abc123"
+  }
+```
+
+**If you bring your own key, its key policy is yours to get right.** The module only writes a key policy for a key it creates. CloudWatch Logs will not accept a key unless the *key policy* itself grants the regional logs service principal (an IAM grant alone is not enough), so without the statement below, `terraform apply` fails when it creates the three log groups this module manages. Add to your key's policy:
+
+```json
+{
+  "Effect": "Allow",
+  "Principal": { "Service": "logs.eu-central-1.amazonaws.com" },
+  "Action": ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"],
+  "Resource": "*",
+  "Condition": {
+    "ArnLike": {
+      "kms:EncryptionContext:aws:logs:arn": "arn:aws:logs:eu-central-1:123456789012:log-group:*"
+    }
+  }
+}
+```
+
+The principal running `terraform apply` also needs `kms:DescribeKey` on the key. Creating a log group with a `kmsKeyId` fails with `AccessDeniedException` without it.
+
+```hcl
+  # Unencrypted: genuinely disables encryption everywhere AWS allows it,
+  # the EBS root volume and the SQS dead-letter queues. Everywhere else, AWS
+  # enforces encryption unconditionally (S3 default encryption, CloudWatch
+  # Logs, Lambda, EventBridge Scheduler) or the resource holds real secrets
+  # by design (SSM SecureString parameters). Those stay on their
+  # AWS-managed default instead of using a customer key.
+  encryption = {
+    type = "unencrypted"
+  }
+```
+
+If you enable AMI export (`ami_transfer.enable_export`) together with a customer-managed key, note that the export is performed by your own `vmimport` IAM role, not by this module. That role reads the encrypted source volume and writes the exported file to S3, so it needs `kms:Decrypt`/`kms:DescribeKey`/`kms:GenerateDataKeyWithoutPlaintext`/`kms:ReEncrypt*` (to read the encrypted AMI) and `kms:GenerateDataKey`/`kms:Decrypt` (to write the encrypted S3 object) on the key. Grant these yourself; the module doesn't own that role and can't grant them for you.
+
+A copied AMI is tagged `CreatedBy`, `BackupType`, and `SourceImageId`, deliberately *not* `SourceInstanceId`. That keeps copies inside the scheduler's retention sweep (so they are cleaned up on the same schedule as any other managed AMI) while keeping them out of "latest managed AMI" selection, so a copy is never itself used as the source of the next copy. Tags you set on the source AMI yourself are not propagated to copies.
+
+AMI copy (`ami_transfer.enable_copy`) with a customer-managed key only preserves that key for a same-region copy. A KMS key is regional, so copying to a different `copy_target_region` falls back to the AWS-managed EBS key in the destination region instead (logged as a warning, not silent).
 
 ---
 
 ## Networking
 
-The instance is **private by default** — no public IP, no open inbound ports.
+The instance is **private by default**: no public IP, no open inbound ports.
 
 | Access method | Description | Requirement |
 |:---|:---|:---|
@@ -383,7 +450,7 @@ If you are using the default VPC without a NAT Gateway, the instance needs a pub
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   associate_public_ip = true
 }
@@ -394,7 +461,7 @@ For an existing VPC and subnet:
 ```hcl
 module "workspace" {
   source  = "douklar/agent-workspace/aws"
-  version = "~> 1.0"
+  version = "~> 3.0"
 
   vpc_id    = "vpc-0abc123"
   subnet_id = "subnet-0abc123"
@@ -413,7 +480,7 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 | `name_prefix` | `workspace` | Prefix applied to all resource names |
 | `instance_name` | `workspace-ec2` | Name tag on the EC2 instance |
 | `instance_type` | `m7i-flex.large` | EC2 instance type |
-| `storage` | `{ size_gb=30, encrypted=true }` | Root EBS volume size and encryption |
+| `storage` | `{ size_gb=30 }` | Root EBS volume size (encryption is controlled by `encryption`) |
 | `associate_public_ip` | `false` | Attach a public IPv4 address |
 | `vpc_id` | `null` | VPC to deploy into (`null` = default VPC) |
 | `subnet_id` | `null` | Subnet to use (`null` = first available) |
@@ -426,7 +493,7 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 | `scheduler_mode` | `free-time` | Initial mode: `free-time` follows the schedule, `on-demand` keeps the instance always on |
 | `scheduler_features` | reconcile only | Backup, patch, and cleanup jobs |
 | `env_vars` | `{}` | Map env var names to SSM parameter paths; `null` value creates a placeholder |
-| `kms_key_arn` | `null` | Customer-managed KMS key ARN |
+| `encryption` | `{ type="aws-managed" }` | `unencrypted`, `aws-managed`, or `customer-managed` (with an optional existing `kms_key_arn`) |
 | `cost_report` | disabled | AWS Budgets cost alert |
 | `ami_transfer` | disabled | AMI copy or export configuration |
 | `enable_session_manager` | `true` | Enable AWS Session Manager access |
@@ -461,32 +528,17 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 | `ami_transfer_lambda_role_arn` | IAM execution role ARN for the AMI transfer Lambda (`null` if transfer disabled) |
 | `ami_transfer_log_group_name` | CloudWatch log group name for the AMI transfer Lambda (`null` if transfer disabled) |
 | `ami_transfer_dlq_arn` | ARN of the AMI transfer Lambda dead-letter queue (`null` if transfer disabled) |
-| `ami_transfer_copy_enabled` | Whether manual AMI copy is enabled |
-| `ami_transfer_export_enabled` | Whether manual AMI export is enabled |
 | `ami_export_bucket_name` | S3 bucket used for AMI exports (`null` if export disabled) |
-| `manual_export_latest_ami_example` | Example `aws lambda invoke` command to export the latest AMI (`null` if export disabled) |
-| `manual_copy_latest_ami_permission_command` | Command to grant EventBridge permission to invoke the AMI copy Lambda (`null` if copy disabled) |
-| `cost_report` | Full cost report configuration object |
-| `cost_report_enabled` | Whether the AWS Budgets alert is active |
-
----
-
-## Encryption reference
-
-| Resource | Default encryption | Supports KMS override |
-|:---|:---|:---:|
-| EBS root volume | AWS-managed EBS key | Yes |
-| SSM parameters | AWS-managed SSM key | Yes |
-| SQS queues | SSE-SQS (no additional cost) | Yes |
-| S3 export bucket | SSE-S3 (AES-256) | Yes |
-| CloudWatch Logs | None by default | Yes (required for log encryption) |
+| `manual_copy_latest_ami_example` | Ready-to-run `aws lambda invoke` command to copy the latest AMI (`null` if copy disabled) |
+| `manual_export_latest_ami_example` | Ready-to-run `aws lambda invoke` command to export the latest AMI (`null` if export disabled) |
+| `kms_key_arn` | Customer-managed KMS key ARN in use (`null` unless `encryption.type = "customer-managed"`) |
 
 ---
 
 ## After apply checklist
 
-1. If `developer_config.enable_tailscale = true` — write the Tailscale auth key to SSM
-2. If `env_vars` has `null` entries — write each secret value to SSM
+1. If `developer_config.enable_tailscale = true`, write the Tailscale auth key to SSM
+2. If `env_vars` has `null` entries, write each secret value to SSM
 3. Connect: run `terraform output -raw ssm_start_session_command` and execute the result
 4. The instance starts automatically at the next scheduled window
 
@@ -496,10 +548,15 @@ Full descriptions and validation rules are in [variables.tf](variables.tf).
 
 | Requirement | Version |
 |:---|:---|
-| Terraform | `>= 1.9.0, < 2.0.0` |
-| AWS Provider | `~> 6.47` |
-| Archive Provider | `~> 2.5` |
+| Terraform | `>= 1.9.0` |
+| AWS Provider | `>= 6.47.0` |
+| Archive Provider | `>= 2.5.0` |
 | AWS CLI | Any recent version (for `ssm start-session`) |
+
+These are minimums, not ranges. The module sets no upper bound on the AWS
+provider, so it will not block you from upgrading or clash with another module
+that needs a newer major version. Pin the version you actually want in your own
+root module and commit `.terraform.lock.hcl`. See [`examples/basic`](examples/basic).
 
 AWS credentials must have permission to create and manage: EC2, IAM, Lambda, EventBridge, SQS, SSM Parameter Store, S3, and CloudWatch.
 
@@ -509,9 +566,11 @@ AWS credentials must have permission to create and manage: EC2, IAM, Lambda, Eve
 
 When `ami_transfer.enable_export = true`, AWS VM Import/Export requires a pre-existing IAM role named `vmimport` (configurable via `ami_transfer.export_role_name`). The role must trust the `vmie.amazonaws.com` service principal.
 
-See [AWS VM Import/Export — Required permissions](https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html) for the exact trust policy and S3 bucket policy.
+See [AWS VM Import/Export: required permissions](https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html) for the exact trust policy and S3 bucket policy.
 
-After apply, the `manual_export_latest_ami_example` output prints the exact `aws lambda invoke` command to trigger an export — no manual construction needed:
+When the module creates the export bucket (`create_export_bucket = true`), `ami_transfer.export_bucket_force_destroy` (default `false`) keeps Terraform from deleting that bucket while it still holds objects. `terraform destroy`, or toggling `enable_export` back off, fails with a recoverable AWS "bucket not empty" error instead of silently discarding exports you meant to keep. Set it to `true` for a disposable/CI workspace where a clean teardown matters more than protecting bucket contents (exports also still expire on their own after `export_retention_days`).
+
+After apply, the `manual_export_latest_ami_example` output prints the exact `aws lambda invoke` command to trigger an export. No manual construction needed:
 
 ```bash
 terraform output -raw manual_export_latest_ami_example
@@ -535,4 +594,4 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).

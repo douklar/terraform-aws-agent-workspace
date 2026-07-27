@@ -15,6 +15,10 @@ data "aws_subnets" "selected_in_vpc" {
     name   = "vpc-id"
     values = [var.vpc_id]
   }
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
 }
 
 data "aws_subnets" "default_in_vpc" {
@@ -22,6 +26,10 @@ data "aws_subnets" "default_in_vpc" {
   filter {
     name   = "vpc-id"
     values = [data.aws_vpc.default_with_fallback[0].id]
+  }
+  filter {
+    name   = "state"
+    values = ["available"]
   }
 }
 
@@ -37,7 +45,7 @@ locals {
   # ── RESOLVED NETWORK IDS ───────────────────────────────────────────────
   selected_vpc_id = local.use_default_vpc ? data.aws_vpc.default_with_fallback[0].id : var.vpc_id
 
-  # sort() makes the auto-selected subnet deterministic — aws_subnets does not
+  # sort() makes the auto-selected subnet deterministic - aws_subnets does not
   # guarantee ordering, so without this the "first" subnet (and its AZ) could
   # change between applies and force instance replacement.
   discovered_subnet_ids = local.use_default_vpc ? data.aws_subnets.default_in_vpc[0].ids : data.aws_subnets.selected_in_vpc[0].ids
@@ -68,7 +76,7 @@ locals {
   # Example: [{ port=443, protocol="tcp" }] → ["443-tcp"]
   user_egress_port_keys = [for r in var.egress_ports : "${r.port}-${lower(r.protocol)}"]
 
-  # Check if user already has 443 tcp — avoid duplicate rule
+  # Check if user already has 443 tcp - avoid duplicate rule
   ssm_443_already_defined = contains(local.user_egress_port_keys, "443-tcp")
 
   # This list will be EMPTY if SSM is disabled OR user already has 443 tcp
@@ -108,6 +116,16 @@ locals {
     for parameter_name in values(local.extra_env_var_ssm_params) :
     "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${trim(parameter_name, "/")}"
   ]
+
+  # Both inputs take a key ID or an ARN; IAM and CloudWatch Logs need an ARN.
+  ssm_parameter_kms_key_arn = var.ssm_parameter_kms_key_id == null ? null : (
+    can(regex("^arn:", var.ssm_parameter_kms_key_id)) ? var.ssm_parameter_kms_key_id :
+    "arn:${data.aws_partition.current.partition}:kms:${var.aws_region}:${data.aws_caller_identity.current.account_id}:key/${var.ssm_parameter_kms_key_id}"
+  )
+  workspace_log_group_kms_key_arn = var.workspace_log_group_kms_key_id == null ? null : (
+    can(regex("^arn:", var.workspace_log_group_kms_key_id)) ? var.workspace_log_group_kms_key_id :
+    "arn:${data.aws_partition.current.partition}:kms:${var.aws_region}:${data.aws_caller_identity.current.account_id}:key/${var.workspace_log_group_kms_key_id}"
+  )
 }
 
 # ─── CLOUDWATCH LOGS ──────────────────────────────────────────────────────────
@@ -115,7 +133,7 @@ resource "aws_cloudwatch_log_group" "workspace" {
   # checkov:skip=CKV_AWS_338:7-day retention is an intentional cost trade-off for bootstrap/instance logs; a year of retention is unnecessary.
   name              = local.cloudwatch_log_group_name
   retention_in_days = 7
-  kms_key_id        = var.workspace_log_group_kms_key_id
+  kms_key_id        = local.workspace_log_group_kms_key_arn
 
   tags = merge(local.common_tags, {
     Name = "${var.name_prefix}-workspace-logs"
@@ -124,9 +142,9 @@ resource "aws_cloudwatch_log_group" "workspace" {
 
 # ─── SECURITY GROUP ───────────────────────────────────────────────────────────
 # Unrestricted egress (0.0.0.0/0) is required: the instance must reach the public
-# internet during bootstrap and operation — apt/OS repositories, AWS service
+# internet during bootstrap and operation - apt/OS repositories, AWS service
 # endpoints (SSM, CloudWatch), Tailscale coordination, and npm/package registries
-# — and those targets do not map to a small, stable CIDR set. Egress is still
+# - and those targets do not map to a small, stable CIDR set. Egress is still
 # limited to the specific ports in var.egress_ports. Ingress is not opened by
 # default (var.ingress_ports defaults to []).
 #trivy:ignore:AVD-AWS-0104
@@ -316,19 +334,35 @@ resource "aws_iam_role_policy" "ssm_parameters" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ssm:GetParameter",
-          "ssm:GetParameters"
-        ]
-        Resource = concat(
-          aws_ssm_parameter.tailscale_auth_key[*].arn,
-          local.extra_env_var_ssm_arns
-        )
-      }
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = [
+            "ssm:GetParameter",
+            "ssm:GetParameters"
+          ]
+          Resource = concat(
+            aws_ssm_parameter.tailscale_auth_key[*].arn,
+            local.extra_env_var_ssm_arns
+          )
+        }
+      ],
+      local.ssm_parameter_kms_key_arn != null ? [
+        {
+          Effect = "Allow"
+          Action = [
+            "kms:Decrypt"
+          ]
+          Resource = local.ssm_parameter_kms_key_arn
+          Condition = {
+            StringEquals = {
+              "kms:ViaService" = "ssm.${var.aws_region}.amazonaws.com"
+            }
+          }
+        }
+      ] : []
+    )
   })
 }
 
@@ -383,27 +417,49 @@ resource "aws_iam_role_policy" "cloudwatch_logs" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:DescribeLogGroups"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogStream",
-          "logs:DescribeLogStreams",
-          "logs:PutLogEvents"
-        ]
-        Resource = [
-          aws_cloudwatch_log_group.workspace.arn,
-          "${aws_cloudwatch_log_group.workspace.arn}:*"
-        ]
-      }
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = [
+            "logs:DescribeLogGroups"
+          ]
+          Resource = "*"
+        },
+        {
+          Effect = "Allow"
+          Action = [
+            "logs:CreateLogStream",
+            "logs:DescribeLogStreams",
+            "logs:PutLogEvents"
+          ]
+          Resource = [
+            aws_cloudwatch_log_group.workspace.arn,
+            "${aws_cloudwatch_log_group.workspace.arn}:*"
+          ]
+        }
+      ],
+      local.workspace_log_group_kms_key_arn != null ? [
+        {
+          # Without this the CloudWatch Agent cannot write to the log group
+          # once a customer-managed key is set.
+          Effect = "Allow"
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:Describe*"
+          ]
+          Resource = local.workspace_log_group_kms_key_arn
+          Condition = {
+            StringEquals = {
+              "kms:ViaService" = "logs.${var.aws_region}.amazonaws.com"
+            }
+          }
+        }
+      ] : []
+    )
   })
 }
 

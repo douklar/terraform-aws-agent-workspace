@@ -2,12 +2,13 @@ name: Terraform CI
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main, dev ]
     paths:
       - '*.tf'
       - '*.tfvars'
       - 'examples/**'
       - 'lambda/**'
+      - 'tests/**'
       - 'modules/ec2-instance/**'
       - '.github/workflows/**'
 
@@ -22,12 +23,17 @@ jobs:
       TF_IN_AUTOMATION: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.12.2
+          terraform_version: 1.15.8
 
       - name: Terraform format check
         run: terraform fmt -check -recursive
@@ -37,6 +43,9 @@ jobs:
 
       - name: Terraform validate
         run: terraform validate
+
+      - name: Terraform test
+        run: terraform test
 
       - name: Terraform init root example
         run: terraform -chdir=examples/basic init -backend=false -input=false
@@ -62,6 +71,15 @@ jobs:
 
       - name: Compile Lambda Python
         run: python -m py_compile lambda/*.py
+
+      - name: Install Python test dependencies
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Lint Python
+        run: python -m ruff check lambda/ tests/
+
+      - name: Run Lambda unit tests
+        run: python -m pytest tests/ -q
 
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v6

@@ -8,6 +8,30 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import boto3
 from botocore.exceptions import ClientError
 
+# Anything not on a stock LogRecord came from a caller's extra={...}.
+_RESERVED_LOG_RECORD_ATTRS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None)).keys()) | {
+    "message",
+    "asctime",
+}
+
+
+class JsonFormatter(logging.Formatter):
+    """Serializes the record plus any `extra` fields as a single JSON line."""
+
+    def format(self, record):
+        payload = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "message": record.getMessage(),
+        }
+        for key, value in record.__dict__.items():
+            if key not in _RESERVED_LOG_RECORD_ATTRS:
+                payload[key] = value
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
+
+
 # Configure structured logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -15,9 +39,7 @@ logger.setLevel(logging.INFO)
 # Add console handler if not already present
 if not logger.handlers:
     handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    )
+    handler.setFormatter(JsonFormatter())
     logger.addHandler(handler)
 
 
@@ -36,7 +58,8 @@ SCHEDULER_MODE_TAG_KEY = os.getenv("SCHEDULER_MODE_TAG_KEY", "scheduler")
 MANAGED_INSTANCE_ID = os.getenv("MANAGED_INSTANCE_ID", "")
 
 MANAGER_TAG_KEY = os.getenv("MANAGER_TAG_KEY", "CreatedBy")
-MANAGER_TAG_VALUE = os.getenv("MANAGER_TAG_VALUE", "workspace-scheduler")
+# No default: scopes which AMIs and snapshots cleanup is allowed to delete.
+MANAGER_TAG_VALUE = os.environ["MANAGER_TAG_VALUE"]
 SCHEDULER_MODE_DEFAULT = os.getenv("SCHEDULER_MODE_DEFAULT", "free-time")
 SCHEDULER_MODE_ON_DEMAND = os.getenv("SCHEDULER_MODE_ON_DEMAND", "on-demand")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
@@ -70,6 +93,7 @@ def positive_int_env(name, default):
 
 
 DAILY_RETENTION_DAYS = positive_int_env("DAILY_RETENTION_DAYS", 7)
+WEEKLY_RETENTION_DAYS = positive_int_env("WEEKLY_RETENTION_DAYS", 30)
 MONTHLY_RETENTION_DAYS = positive_int_env("MONTHLY_RETENTION_DAYS", 30)
 
 
@@ -413,8 +437,8 @@ def window_allows_time(utc_now, window):
 
     window_timezone = window.get("timezone") or SCHEDULE_TIMEZONE
     local_now = utc_now.astimezone(ZoneInfo(window_timezone))
-    start_minutes = parse_window_time(window, "start_time", "start_minute", "start")
-    stop_minutes = parse_window_time(window, "stop_time", "stop_minute", "stop")
+    start_minutes = window_time_minutes(window, "start_time")
+    stop_minutes = window_time_minutes(window, "stop_time")
 
     current_day = DAY_NAMES[local_now.weekday()]
     previous_day = DAY_NAMES[(local_now.weekday() - 1) % len(DAY_NAMES)]
@@ -432,32 +456,10 @@ def window_allows_time(utc_now, window):
     )
 
 
-def parse_window_time(window, time_key, legacy_minute_key, legacy_time_key):
-    if time_key in window:
-        return parse_hhmm(window[time_key])
-
-    if legacy_minute_key in window:
-        return validate_minute(window[legacy_minute_key], legacy_minute_key)
-
-    if legacy_time_key in window:
-        return parse_hhmm(window[legacy_time_key])
-
-    if legacy_time_key == "stop" and "end" in window:
-        return parse_hhmm(window["end"])
-
-    raise ValueError(f"Allowed window is missing {time_key}: {window}")
-
-
-def validate_minute(value, key):
-    try:
-        minute = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be a minute from 0 to 1439: {value}") from exc
-
-    if minute < 0 or minute > 1439:
-        raise ValueError(f"{key} must be a minute from 0 to 1439: {value}")
-
-    return minute
+def window_time_minutes(window, key):
+    if key not in window:
+        raise ValueError(f"Allowed window is missing {key}: {window}")
+    return parse_hhmm(window[key])
 
 
 def parse_hhmm(value):
@@ -517,21 +519,21 @@ def create_amis(backup_type):
     return created
 
 
-def is_snapshot_referenced(snapshot_id):
-    """Check if a snapshot is referenced by other AMIs (excluding the scheduler-created ones)."""
+def is_snapshot_referenced(snapshot_id, exclude_image_id):
+    """Check if a snapshot is referenced by any AMI other than the one being deregistered."""
     try:
-        response = ec2.describe_images(
+        paginator = ec2.get_paginator("describe_images")
+        for page in paginator.paginate(
+            # Only our own AMIs can reference our own snapshot.
+            Owners=["self"],
             Filters=[
                 {"Name": "block-device-mapping.snapshot-id", "Values": [snapshot_id]},
             ],
-        )
-        # Filter out scheduler-created images - we only care about other images
-        other_images = [
-            img for img in response.get("Images", [])
-            if not any(t["Key"] == MANAGER_TAG_KEY and t["Value"] == MANAGER_TAG_VALUE
-                      for t in img.get("Tags", []))
-        ]
-        return len(other_images) > 0
+        ):
+            for image in page.get("Images", []):
+                if image["ImageId"] != exclude_image_id:
+                    return True
+        return False
     except ClientError as e:
         logger.error(
             "Failed to check snapshot usage",
@@ -566,12 +568,14 @@ def retry_api_call(func, max_retries=3, base_delay=1):
 def cleanup_amis():
     now = datetime.now(timezone.utc)
     daily_cutoff = now - timedelta(days=DAILY_RETENTION_DAYS)
+    weekly_cutoff = now - timedelta(days=WEEKLY_RETENTION_DAYS)
     monthly_cutoff = now - timedelta(days=MONTHLY_RETENTION_DAYS)
 
     logger.info(
         "Starting AMI cleanup",
         extra={
             "daily_cutoff": daily_cutoff.isoformat(),
+            "weekly_cutoff": weekly_cutoff.isoformat(),
             "monthly_cutoff": monthly_cutoff.isoformat(),
             "dry_run": DRY_RUN,
         },
@@ -583,10 +587,10 @@ def cleanup_amis():
         {"Name": f"tag:{MANAGER_TAG_KEY}", "Values": [MANAGER_TAG_VALUE]},
     ]
 
-    images = ec2.describe_images(
-        Owners=["self"],
-        Filters=filters,
-    ).get("Images", [])
+    images = []
+    paginator = ec2.get_paginator("describe_images")
+    for page in paginator.paginate(Owners=["self"], Filters=filters):
+        images.extend(page.get("Images", []))
 
     logger.info("Found images to evaluate", extra={"count": len(images)})
 
@@ -612,8 +616,10 @@ def cleanup_amis():
 
         if backup_type == "monthly":
             expired = created_at < monthly_cutoff
+        elif backup_type == "weekly":
+            expired = created_at < weekly_cutoff
         else:
-            # weekly (and any legacy daily type) use this retention window
+            # any legacy/unrecognized backup type uses the daily window
             expired = created_at < daily_cutoff
 
         if not expired:
@@ -630,7 +636,7 @@ def cleanup_amis():
 
         # Deregister AMI with error handling
         try:
-            retry_api_call(lambda: ec2.deregister_image(ImageId=image_id))
+            retry_api_call(lambda iid=image_id: ec2.deregister_image(ImageId=iid))
             logger.info("Deregistered AMI", extra={"image_id": image_id})
         except ClientError as e:
             error_msg = f"Failed to deregister AMI {image_id}: {e}"
@@ -648,7 +654,7 @@ def cleanup_amis():
                 continue
 
             # Check if snapshot is referenced by other AMIs
-            if is_snapshot_referenced(snapshot_id):
+            if is_snapshot_referenced(snapshot_id, exclude_image_id=image_id):
                 logger.warning(
                     "Snapshot is referenced by other AMIs, skipping deletion",
                     extra={"snapshot_id": snapshot_id, "image_id": image_id},
@@ -695,7 +701,7 @@ def run_security_update():
 
     command_id = response["Command"]["CommandId"]
 
-    statuses = {instance_id: "Pending" for instance_id in running}
+    statuses = dict.fromkeys(running, "Pending")
     terminal = {"Success", "Failed", "TimedOut", "Cancelled"}
     # 24 iterations × 10 s = 240 s max; Lambda timeout is 360 s, leaving headroom.
     for _ in range(24):
@@ -768,10 +774,10 @@ def cleanup_daily_snapshots():
         {"Name": "tag:BackupType", "Values": ["daily-snapshot"]},
     ]
 
-    snapshots = ec2.describe_snapshots(
-        OwnerIds=["self"],
-        Filters=filters,
-    ).get("Snapshots", [])
+    snapshots = []
+    paginator = ec2.get_paginator("describe_snapshots")
+    for page in paginator.paginate(OwnerIds=["self"], Filters=filters):
+        snapshots.extend(page.get("Snapshots", []))
 
     cleaned = []
     for snapshot in snapshots:

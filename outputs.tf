@@ -43,16 +43,6 @@ output "ami_transfer_lambda_arn" {
   value       = local.ami_transfer_enabled ? aws_lambda_function.ami_transfer[0].arn : null
 }
 
-output "ami_transfer_copy_enabled" {
-  description = "Whether manual AMI copy action is enabled in Lambda environment."
-  value       = var.ami_transfer.enable_copy
-}
-
-output "ami_transfer_export_enabled" {
-  description = "Whether manual AMI export action is enabled in Lambda environment."
-  value       = var.ami_transfer.enable_export
-}
-
 output "ami_export_bucket_name" {
   description = "S3 bucket used by manual AMI export, or null when export is disabled."
   value       = var.ami_transfer.enable_export ? local.manual_export_bucket_name : null
@@ -113,9 +103,9 @@ output "ssm_start_session_command" {
   value       = var.enable_session_manager ? module.ec2_instance.ssm_start_session_command : null
 }
 
-output "manual_copy_latest_ami_permission_command" {
-  description = "Permission command to allow AMI copy operation, or null when copy is disabled."
-  value       = var.ami_transfer.enable_copy && contains(keys(aws_scheduler_schedule.this), "ami_weekly") ? "aws lambda add-permission --function-name ${aws_lambda_function.ami_transfer[0].function_name} --statement-id AllowExecutionFromScheduler --action lambda:InvokeFunction --principal scheduler.amazonaws.com --source-arn ${aws_scheduler_schedule.this["ami_weekly"].arn}" : null
+output "manual_copy_latest_ami_example" {
+  description = "Command to manually copy the latest managed AMI, or null when copy is disabled."
+  value       = var.ami_transfer.enable_copy ? "aws lambda invoke --function-name ${aws_lambda_function.ami_transfer[0].function_name} --payload '{\"action\":\"copy_latest_ami\"}' copy-latest-ami.json" : null
 }
 
 output "manual_export_latest_ami_example" {
@@ -123,14 +113,7 @@ output "manual_export_latest_ami_example" {
   value       = var.ami_transfer.enable_export ? "aws lambda invoke --function-name ${aws_lambda_function.ami_transfer[0].function_name} --payload '{\"action\":\"export_latest_ami\",\"disk_format\":\"${var.ami_transfer.export_disk_format}\"}' export-latest-ami.json" : null
 }
 
-# ================== Cost Report Outputs ==================
-
-output "cost_report" {
-  description = "Cost report configuration and status."
-  value       = var.cost_report
-}
-
-output "cost_report_enabled" {
-  description = "Whether cost report is enabled."
-  value       = local.cost_report_enabled
+output "kms_key_arn" {
+  description = "The KMS key ARN used for customer-managed encryption (either the one you supplied via encryption.kms_key_arn, or the one this module created), or null when encryption.type is unencrypted or aws-managed."
+  value       = local.resolved_kms_key_arn
 }

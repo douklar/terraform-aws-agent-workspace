@@ -18,6 +18,11 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+  # tests/requirements-test.txt is a separate manifest the "/" entry misses.
+  - package-ecosystem: "pip"
+    directory: "/tests"
+    schedule:
+      interval: weekly
   - package-ecosystem: "terraform"
     directory: "/"
     schedule:

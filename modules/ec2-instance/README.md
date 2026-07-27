@@ -8,12 +8,12 @@ Configure providers in your root Terraform configuration:
 
 ```hcl
 terraform {
-  required_version = ">= 1.9.0, < 2.0.0"
+  required_version = ">= 1.9.0"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 6.0"
+      version = ">= 6.47.0"
     }
   }
 }
@@ -122,7 +122,7 @@ When `developer_config.enable_tailscale = true`, the module creates a SecureStri
 | `env_vars` | `{}` | Map env var names to SSM parameter paths; `null` value creates a placeholder |
 | `enable_session_manager` | `true` | Enable Session Manager shell access |
 | `scheduler_mode` | `free-time` | Initial value of the `scheduler` tag; set at creation only (runtime overrides are preserved) |
-| `workspace_log_group_kms_key_id` | `null` | KMS key ARN for the CloudWatch log group |
+| `workspace_log_group_kms_key_id` | `null` | KMS key ID or ARN for the CloudWatch log group |
 | `ssm_parameter_kms_key_id` | `null` | KMS key ID or ARN for module-created SecureString parameters |
 | `tags` | `{}` | Additional tags applied to all resources |
 

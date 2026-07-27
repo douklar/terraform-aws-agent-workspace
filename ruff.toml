@@ -1,0 +1,24 @@
+# Lint settings for the Lambda handlers and their tests.
+# Applied in CI on pull requests, so style problems are caught before review.
+
+line-length = 120
+target-version = "py314"
+
+[lint]
+select = [
+    "E", # pycodestyle errors
+    "W", # pycodestyle warnings
+    "F", # pyflakes: unused imports and names, undefined variables
+    "B", # bugbear: likely bugs, such as a lambda capturing a loop variable
+    "C4", # comprehension shortcuts
+    "UP", # syntax that is outdated for the target Python version
+]
+
+ignore = [
+    "UP017", # timezone.utc reads fine and works on every version; datetime.UTC is only an alias
+]
+
+[lint.per-file-ignores]
+# conftest.py puts lambda/ on sys.path before the handlers are imported, so the
+# import order in the test files is deliberate.
+"tests/*" = ["E402"]
